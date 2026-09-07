@@ -62,7 +62,10 @@ notification delivery itself is not a remote acknowledgement of UI/history work.
 
 Pi's prompt ACK may describe an input command with no agent run. Started runs wait
 for `agent_settled`, including retry/automatic compaction, rather than `agent_end`.
-Cancellation sends `clear_queue` before `abort`. EOF fails pending work, and closing
+Cancellation waits for `clear_queue`, `abort` and queued events before classifying
+pending steer delivery. Natural settlement clears unapplied queued steer before
+allowing another prompt. Unanswered extension questions are cancelled before abort.
+EOF fails pending work, and closing
 the ACP connection terminates the owned Pi process tree.
 
 MCP, permission modes, terminal-history import/discovery, session fork, TUI widgets,
@@ -94,8 +97,11 @@ with a smaller recent-context retention threshold for compaction. Credentials an
 normal Pi settings were unchanged; real transcripts are not committed.
 
 Windows process-tree shutdown/packaging and other providers remain unverified.
-The original spike's full Electron validation is historical evidence; this repository
-still needs Lody's builtin registration and managed artifact/release integration.
+The original spike's full Electron validation is historical evidence. Current Lody
+custom ACP integration is blocked: Lody automatically injects its builtin MCP server,
+which this adapter explicitly rejects. Configuration probing succeeds, but the first
+conversation cannot start until that capability mismatch is resolved. Full Electron
+acceptance, builtin registration and managed artifact/release integration remain open.
 No npm or managed runtime release is claimed by this initial source push.
 
 ## Upstream contract and provenance

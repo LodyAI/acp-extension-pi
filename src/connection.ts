@@ -344,13 +344,27 @@ export class PiRpcConnection implements AgentConnection {
   cancel: AgentConnection["cancel"] = async (request) => {
     this.assertSession(request.sessionId);
     if (this.active) this.active.cancelled = true;
-    this.pendingSteer?.applied.reject(
-      new Error("Pi steer cancelled before application"),
-    );
-    await this.cancelQuestions();
-    // abort alone lets already queued messages continue in Pi.
-    await this.rpc.request("clear_queue");
-    await this.rpc.request("abort");
+    const pending = this.pendingSteer;
+    try {
+      await this.cancelQuestions();
+      // clear_queue alone cannot see messages already drained into Pi's agent loop.
+      // abort waits for idle; drain observes their message_start before classifying delivery.
+      await this.rpc.request("clear_queue");
+      await this.rpc.request("abort");
+      await this.rpc.drain();
+      if (pending && this.pendingSteer === pending)
+        pending.applied.reject(
+          acp.RequestError.invalidRequest(
+            undefined,
+            "Pi steer cancelled before delivery",
+          ),
+        );
+    } catch (error) {
+      pending?.applied.reject(
+        error instanceof Error ? error : new Error("Pi cancellation failed"),
+      );
+      throw error;
+    }
   };
 
   private promptContent(blocks: acp.ContentBlock[]) {
@@ -445,23 +459,35 @@ export class PiRpcConnection implements AgentConnection {
         if (!run.started) break;
         run.settled = true;
         const pending = this.pendingSteer;
-        if (pending) {
-          // A native refusal can follow settlement on the wire. Preserve that verdict,
-          // which lets the host safely requeue, instead of racing it with a generic error.
-          void pending.acknowledged.promise
-            .then(() => this.rpc.drain())
-            .then(() => {
-              if (this.pendingSteer === pending)
+        // Finish outside the event queue: drain must be able to observe a late refusal.
+        // Keep this run active until idle queued input is cleared, so a new prompt
+        // cannot accidentally consume it.
+        void (async () => {
+          if (pending && !run.cancelled) {
+            await pending.acknowledged.promise;
+            await this.rpc.drain();
+            if (this.pendingSteer === pending && !run.cancelled) {
+              await this.rpc.request("clear_queue");
+              await this.rpc.drain();
+              if (this.pendingSteer === pending && !run.cancelled)
                 pending.applied.reject(
-                  new Error("Pi settled before steer application"),
+                  acp.RequestError.invalidRequest(
+                    undefined,
+                    "Pi settled before steer delivery",
+                  ),
                 );
-            })
-            .catch((error: Error) => pending.applied.reject(error));
-        }
-        await this.reportUsage();
-        if (run.error && !run.cancelled) run.reject(new Error(run.error));
-        else
-          run.resolve({ stopReason: run.cancelled ? "cancelled" : "end_turn" });
+            }
+          }
+          await this.reportUsage();
+          if (run.error && !run.cancelled) run.reject(new Error(run.error));
+          else
+            run.resolve({
+              stopReason: run.cancelled ? "cancelled" : "end_turn",
+            });
+        })().catch((error: Error) => {
+          pending?.applied.reject(error);
+          run.reject(error);
+        });
         break;
       }
       case "message_start": {
@@ -479,7 +505,6 @@ export class PiRpcConnection implements AgentConnection {
         if (
           pending &&
           pending.run === run &&
-          !run.cancelled &&
           message.role === "custom" &&
           message.customType === "lody-steer" &&
           identity.success &&

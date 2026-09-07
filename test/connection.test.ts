@@ -419,6 +419,89 @@ describe("native Pi connection", () => {
     p.close();
   });
 
+  it("clears a steer stranded at natural settlement before allowing the next prompt", async () => {
+    const p = peer();
+    await start(p);
+    const done = p.client.prompt(prompt);
+    await p.accepted.promise;
+    const queued = deferred();
+    p.setPrompt((request) => {
+      p.reply(request);
+      queued.resolve();
+    });
+    const steer = p.client.request(LODY_EXTENSION_METHODS.sessionSteer, {
+      sessionId: prompt.sessionId,
+      steerId: "settlement-race",
+      prompt: prompt.prompt,
+    });
+    const rejected = expect(steer).rejects.toMatchObject({ code: -32600 });
+    await queued.promise;
+    p.emit({ type: "agent_settled" });
+    await done;
+    await rejected;
+    expect(p.commands.some((command) => command.type === "clear_queue")).toBe(
+      true,
+    );
+    await expect(p.client.prompt(prompt)).resolves.toEqual({
+      stopReason: "end_turn",
+    });
+    p.close();
+  });
+
+  it.each([false, true])(
+    "classifies cancelled steer after abort drains (applied=%s)",
+    async (applied) => {
+      const p = peer();
+      await start(p);
+      const done = p.client.prompt(prompt);
+      await p.accepted.promise;
+      const queued = deferred();
+      const notifications: unknown[] = [];
+      p.host.extension = async (_method, params) => {
+        notifications.push(params);
+      };
+      p.setPrompt((request) => {
+        p.reply(request);
+        queued.resolve();
+      });
+      const steer = p.client.request(LODY_EXTENSION_METHODS.sessionSteer, {
+        sessionId: prompt.sessionId,
+        steerId: "cancel-race",
+        prompt: prompt.prompt,
+      });
+      const result = steer.then(
+        (value) => ({ value }),
+        (error) => ({ error }),
+      );
+      await queued.promise;
+      p.setAbort((request) => {
+        if (applied)
+          p.emit({
+            type: "message_start",
+            message: {
+              role: "custom",
+              customType: "lody-steer",
+              details: { steerId: "cancel-race" },
+            },
+          });
+        p.emit({ type: "agent_settled" });
+        p.reply(request);
+      });
+      await p.client.cancel({ sessionId: prompt.sessionId });
+      if (applied) {
+        expect(await result).toMatchObject({ value: { outcome: "injected" } });
+        expect(notifications).toEqual([
+          { sessionId: prompt.sessionId, steerId: "cancel-race" },
+        ]);
+      } else {
+        expect(await result).toMatchObject({ error: { code: -32600 } });
+        expect(notifications).toEqual([]);
+      }
+      await expect(done).resolves.toEqual({ stopReason: "cancelled" });
+      p.close();
+    },
+  );
+
   it.each(["cancel", "eof"] as const)(
     "settles pending steer on %s without applying it to a later turn",
     async (reason) => {
