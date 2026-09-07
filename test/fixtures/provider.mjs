@@ -1,3 +1,5 @@
+import { writeFile } from "node:fs/promises";
+import { join } from "node:path";
 import { Type } from "@sinclair/typebox";
 import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
 export default function (pi) {
@@ -124,8 +126,20 @@ export default function (pi) {
   );
   pi.registerCommand("ask-fixture", {
     description: "Synthetic question",
-    handler: async (_args, ctx) => {
-      await ctx.ui.input("Fixture question");
+    handler: async (args, ctx) => {
+      const kind = args.trim() || "input";
+      const value =
+        kind === "select"
+          ? await ctx.ui.select("Fixture select", ["chosen", "other"])
+          : kind === "confirm"
+            ? await ctx.ui.confirm("Fixture confirm", "Continue?")
+            : kind === "editor"
+              ? await ctx.ui.editor("Fixture editor", "prefilled text")
+              : await ctx.ui.input("Fixture input");
+      await writeFile(
+        join(ctx.cwd, "fixture-answer.json"),
+        JSON.stringify({ kind, value: value ?? null }),
+      );
     },
   });
 }

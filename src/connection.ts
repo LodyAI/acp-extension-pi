@@ -112,6 +112,7 @@ export class PiRpcConnection implements AgentConnection {
   private model?: z.infer<typeof modelSchema>;
   private active?: Run;
   private configuring = false;
+  private readonly questions = new Map<string, () => Promise<void>>();
   private steeringReady = false;
   private pendingSteer?: {
     id: string;
@@ -128,6 +129,7 @@ export class PiRpcConnection implements AgentConnection {
       stream,
       (event) => this.event(event),
       (error) => {
+        this.questions.clear();
         this.active?.reject(error);
         this.pendingSteer?.applied.reject(error);
       },
@@ -334,6 +336,7 @@ export class PiRpcConnection implements AgentConnection {
       }
       return await run.promise;
     } finally {
+      await this.cancelQuestions().catch(() => undefined);
       if (this.active === run) this.active = undefined;
     }
   };
@@ -344,6 +347,7 @@ export class PiRpcConnection implements AgentConnection {
     this.pendingSteer?.applied.reject(
       new Error("Pi steer cancelled before application"),
     );
+    await this.cancelQuestions();
     // abort alone lets already queued messages continue in Pi.
     await this.rpc.request("clear_queue");
     await this.rpc.request("abort");
@@ -418,15 +422,7 @@ export class PiRpcConnection implements AgentConnection {
     if (event.type === "extension_ui_request") {
       const request = questionSchema.parse(event);
       // Do not block the wire/notification queue on a human response.
-      void this.question(request)
-        .catch(() =>
-          this.rpc.send({
-            type: "extension_ui_response",
-            id: request.id,
-            cancelled: true,
-          }),
-        )
-        .catch(() => undefined);
+      void this.question(request).catch(() => undefined);
       return;
     }
     const run = this.active;
@@ -673,62 +669,79 @@ export class PiRpcConnection implements AgentConnection {
     if (!run || run.settled || run.cancelled) return cancel();
     const options =
       request.method === "confirm" ? ["Yes", "No"] : request.options;
-    const response = await this.host.question({
-      mode: "form",
-      sessionId: this.sessionId,
-      message: [
-        request.title,
-        request.message,
-        request.prefill ? `Current text:\n${request.prefill}` : undefined,
-      ]
-        .filter(Boolean)
-        .join("\n"),
-      requestedSchema: {
-        type: "object",
-        properties: {
-          answer: {
-            type: "string",
-            title: request.title ?? "Pi",
-            ...(options
-              ? {
-                  oneOf: options.map((value) => ({
-                    const: value,
-                    title: value,
-                  })),
-                }
-              : {}),
+    const respond = async (fields: Record<string, unknown>): Promise<void> => {
+      if (!this.questions.delete(request.id)) return;
+      await this.rpc.send({
+        type: "extension_ui_response",
+        id: request.id,
+        ...fields,
+      });
+    };
+    this.questions.set(request.id, () => respond({ cancelled: true }));
+    try {
+      const response = await this.host.question({
+        mode: "form",
+        sessionId: this.sessionId,
+        message: [
+          request.title,
+          request.message,
+          request.prefill ? `Current text:\n${request.prefill}` : undefined,
+        ]
+          .filter(Boolean)
+          .join("\n"),
+        requestedSchema: {
+          type: "object",
+          properties: {
+            answer: {
+              type: "string",
+              title: request.title ?? "Pi",
+              ...(options
+                ? {
+                    oneOf: options.map((value) => ({
+                      const: value,
+                      title: value,
+                    })),
+                  }
+                : {}),
+            },
+          },
+          required: ["answer"],
+        },
+        _meta: {
+          lody: {
+            elicitation: {
+              version: 1,
+              autoResolveAfterSeconds:
+                request.timeout === undefined ? null : request.timeout / 1000,
+            },
           },
         },
-        required: ["answer"],
-      },
-      _meta: {
-        lody: {
-          elicitation: {
-            version: 1,
-            autoResolveAfterSeconds:
-              request.timeout === undefined ? null : request.timeout / 1000,
-          },
-        },
-      },
-    });
-    if (
-      this.active !== run ||
-      run.cancelled ||
-      run.settled ||
-      response.action !== "accept"
-    )
-      return cancel();
-    const value = z.object({ answer: z.string() }).safeParse(response.content);
-    const answer = value.success ? value.data.answer : undefined;
-    if (typeof answer !== "string" || (options && !options.includes(answer)))
-      return cancel();
-    await this.rpc.send({
-      type: "extension_ui_response",
-      id: request.id,
-      ...(request.method === "confirm"
-        ? { confirmed: answer === "Yes" }
-        : { value: answer }),
-    });
+      });
+      if (
+        this.active !== run ||
+        run.cancelled ||
+        run.settled ||
+        response.action !== "accept"
+      )
+        return respond({ cancelled: true });
+      const value = z
+        .object({ answer: z.string() })
+        .safeParse(response.content);
+      const answer = value.success ? value.data.answer : undefined;
+      if (typeof answer !== "string" || (options && !options.includes(answer)))
+        return respond({ cancelled: true });
+      await respond({
+        ...(request.method === "confirm"
+          ? { confirmed: answer === "Yes" }
+          : { value: answer }),
+      });
+    } catch {
+      await respond({ cancelled: true });
+    }
+  }
+
+  private async cancelQuestions(): Promise<void> {
+    await Promise.all([...this.questions.values()].map((cancel) => cancel()));
   }
 
   private async configure<T>(

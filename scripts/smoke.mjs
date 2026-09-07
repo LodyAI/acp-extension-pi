@@ -10,6 +10,7 @@ import { ClientSideConnection, ndJsonStream } from "@agentclientprotocol/sdk";
 const root = await mkdtemp(join(tmpdir(), "acp-pi-smoke-"));
 const children = new Set();
 let toolStarted;
+let answerQuestion = async () => ({ action: "cancel" });
 const output = [];
 async function start(id) {
   const child = spawn(
@@ -49,7 +50,7 @@ async function start(id) {
           output.push(update.content.text);
       },
       requestPermission: async () => ({ outcome: { outcome: "cancelled" } }),
-      unstable_createElicitation: async () => ({ action: "cancel" }),
+      unstable_createElicitation: (request) => answerQuestion(request),
       extNotification: async () => {},
     }),
     ndJsonStream(Writable.toWeb(child.stdin), Readable.toWeb(child.stdout)),
@@ -93,6 +94,45 @@ try {
   );
   await prompt("handled fixture");
   await prompt("/ask-fixture");
+  for (const [kind, value] of [
+    ["input", "typed"],
+    ["select", "chosen"],
+    ["confirm", "Yes"],
+    ["editor", "edited text"],
+  ]) {
+    answerQuestion = async () => ({
+      action: "accept",
+      content: { answer: value },
+    });
+    await prompt(`/ask-fixture ${kind}`);
+    assert.deepEqual(
+      JSON.parse(await readFile(join(root, "fixture-answer.json"), "utf8")),
+      { kind, value: kind === "confirm" ? true : value },
+    );
+  }
+  let questionSeen;
+  const seen = new Promise((resolve) => {
+    questionSeen = resolve;
+  });
+  let releaseAnswer;
+  const late = new Promise((resolve) => {
+    releaseAnswer = resolve;
+  });
+  answerQuestion = async () => {
+    questionSeen();
+    return late;
+  };
+  const pendingQuestion = prompt("/ask-fixture");
+  await seen;
+  await a.client.cancel({ sessionId: a.id });
+  assert.equal((await pendingQuestion).stopReason, "cancelled");
+  releaseAnswer({ action: "accept", content: { answer: "late answer" } });
+  assert.deepEqual(
+    JSON.parse(await readFile(join(root, "fixture-answer.json"), "utf8")),
+    { kind: "input", value: null },
+  );
+  await prompt("continue after cancelling question");
+
   await prompt("/stats");
   const ready = new Promise((resolve) => {
     toolStarted = resolve;

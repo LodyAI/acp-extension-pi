@@ -649,6 +649,42 @@ describe("native Pi connection", () => {
     p.close();
   });
 
+  it("cancels a pending extension dialog before its host answers and ignores the late answer", async () => {
+    const p = peer();
+    await start(p);
+    const seen = deferred();
+    const answer = deferred<acp.CreateElicitationResponse>();
+    p.host.question = async () => {
+      seen.resolve();
+      return answer.promise;
+    };
+    let command!: Record<string, unknown>;
+    p.setPrompt((request) => {
+      command = request;
+      p.emit({
+        type: "extension_ui_request",
+        id: "held",
+        method: "input",
+        title: "Waiting",
+      });
+    });
+    const done = p.client.prompt(prompt);
+    await seen.promise;
+    await p.client.cancel({ sessionId: prompt.sessionId });
+    const cancelledBeforeAnswer = p.replies.some(
+      (r) => r.id === "held" && r.cancelled === true,
+    );
+    answer.resolve({ action: "accept", content: { answer: "too late" } });
+    await p.questionAnswered.promise;
+    p.reply(command);
+    await expect(done).resolves.toEqual({ stopReason: "cancelled" });
+    expect(cancelledBeforeAnswer).toBe(true);
+    expect(p.replies.filter((r) => r.id === "held")).toEqual([
+      { type: "extension_ui_response", id: "held", cancelled: true },
+    ]);
+    p.close();
+  });
+
   it("answers extension dialogs without blocking the wire, and rejects startup questions", async () => {
     const p = peer();
     await start(p);
