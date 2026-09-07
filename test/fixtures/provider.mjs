@@ -1,9 +1,11 @@
+import { writeFileSync } from "node:fs";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { Type } from "@sinclair/typebox";
 import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
 export default function (pi) {
   let release;
+  let blockShutdown = false;
   pi.registerTool({
     name: "fixture_gate",
     label: "Fixture gate",
@@ -24,6 +26,11 @@ export default function (pi) {
       release?.();
     },
   });
+  pi.on("session_shutdown", async () => {
+    if (!blockShutdown) return;
+    await writeFile("shutdown-observed", "yes\n");
+    await new Promise(() => {});
+  });
 
   pi.registerProvider("lody-fixture", {
     api: "lody-fixture-api",
@@ -43,6 +50,11 @@ export default function (pi) {
     streamSimple(model, context) {
       const stream = createAssistantMessageEventStream();
       const last = context.messages.at(-1);
+      const input = JSON.stringify(last?.content);
+      if (input.includes("process fixture")) {
+        blockShutdown = true;
+        writeFileSync("pi.pid", `${process.pid}\n`);
+      }
       const message = {
         role: "assistant",
         api: model.api,
@@ -64,18 +76,24 @@ export default function (pi) {
         stream.push({ type: "start", partial: message });
         if (
           last?.role === "user" &&
-          (JSON.stringify(last.content).includes("write fixture") ||
-            JSON.stringify(last.content).includes("gate fixture"))
+          (input.includes("write fixture") ||
+            input.includes("gate fixture") ||
+            input.includes("process fixture"))
         ) {
+          const gate = input.includes("gate fixture");
+          const processTool = input.includes("process fixture");
           const tool = {
             type: "toolCall",
             id: "write-fixture",
-            name: JSON.stringify(last.content).includes("gate fixture")
-              ? "fixture_gate"
-              : "write",
-            arguments: JSON.stringify(last.content).includes("gate fixture")
+            name: gate ? "fixture_gate" : processTool ? "bash" : "write",
+            arguments: gate
               ? {}
-              : { path: "fixture.txt", content: "native pi wrote this\n" },
+              : processTool
+                ? {
+                    command:
+                      "echo $$ > process.pid; exec /bin/cat process.fifo",
+                  }
+                : { path: "fixture.txt", content: "native pi wrote this\n" },
           };
           message.content = [tool];
           message.stopReason = "toolUse";

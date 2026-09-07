@@ -60,17 +60,22 @@ ownership on the applied notification before consuming later output. Lody alread
 provides that barrier. The adapter sends notifications in native event order; ACP
 notification delivery itself is not a remote acknowledgement of UI/history work.
 
+MCP is outside the first adapter version. The adapter advertises
+`_meta.lody.mcp = { version: 1, supported: false }`; compatible hosts must omit both
+builtin and workspace MCP servers when starting Pi. Older hosts that still send a
+non-empty MCP list are rejected before Pi starts.
+
 Pi's prompt ACK may describe an input command with no agent run. Started runs wait
 for `agent_settled`, including retry/automatic compaction, rather than `agent_end`.
 Cancellation waits for `clear_queue`, `abort` and queued events before classifying
 pending steer delivery. Natural settlement clears unapplied queued steer before
 allowing another prompt. Unanswered extension questions are cancelled before abort.
-EOF fails pending work, and closing
-the ACP connection terminates the owned Pi process tree.
+EOF fails pending work. Closing the ACP connection lets Pi stop its tracked native
+tool processes before the adapter waits for Pi to exit.
 
-MCP, permission modes, terminal-history import/discovery, session fork, TUI widgets,
-in-app OAuth and managed artifact publication are not implemented. MCP is refused
-explicitly. Existing third-party `pi-acp` identities are not automatically migrated.
+Permission modes, terminal-history import/discovery, session fork, TUI widgets,
+in-app OAuth and managed artifact publication are not implemented. Existing
+third-party `pi-acp` identities are not automatically migrated.
 Simultaneous terminal editing of an active native session file is not coordinated.
 
 ## Verification
@@ -85,8 +90,8 @@ Unit tests cover framing/correlation, lifecycle settlement, retry, cancellation,
 EOF, repeated steering identities and output order, native resume, model configuration,
 usage and interactive input. The executable smoke uses a real pinned Pi runtime
 with a synthetic offline provider: actual file write, input commands, questions,
-stats, tool cancellation, ACP stdin shutdown during a running tool, process restart/
-native resume, and failed session replacement with explicit recovery.
+stats, tool cancellation, adapter signal shutdown with a real bash process, process
+restart/native resume, and failed session replacement with explicit recovery.
 It requires no provider credentials or network calls after dependency installation.
 Temporary synthetic artifacts are retained at the printed path.
 
@@ -96,13 +101,12 @@ compaction, stats and process restart/native resume. It used an isolated Pi prof
 with a smaller recent-context retention threshold for compaction. Credentials and
 normal Pi settings were unchanged; real transcripts are not committed.
 
-Windows process-tree shutdown/packaging and other providers remain unverified.
-The original spike's full Electron validation is historical evidence. Current Lody
-custom ACP integration is blocked: Lody automatically injects its builtin MCP server,
-which this adapter explicitly rejects. Configuration probing succeeds, but the first
-conversation cannot start until that capability mismatch is resolved. Full Electron
-acceptance, builtin registration and managed artifact/release integration remain open.
-No npm or managed runtime release is claimed by this initial source push.
+Windows process-tree shutdown/packaging and other providers remain unverified. The
+original spike's full Electron validation is historical evidence. Full Electron
+acceptance requires a Lody version that honors Core's MCP opt-out before session
+startup; older hosts that inject builtin MCP remain incompatible. Builtin registration
+and managed artifact/release integration remain open. No npm or managed runtime
+release is claimed by this initial source push.
 
 ## Upstream contract and provenance
 

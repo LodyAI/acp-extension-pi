@@ -118,7 +118,6 @@ export class PiRpcConnection implements AgentConnection {
     id: string;
     run: Run;
     applied: ReturnType<typeof deferred<void>>;
-    acknowledged: ReturnType<typeof deferred<void>>;
   };
 
   constructor(
@@ -464,7 +463,6 @@ export class PiRpcConnection implements AgentConnection {
         // cannot accidentally consume it.
         void (async () => {
           if (pending && !run.cancelled) {
-            await pending.acknowledged.promise;
             await this.rpc.drain();
             if (this.pendingSteer === pending && !run.cancelled) {
               await this.rpc.request("clear_queue");
@@ -848,7 +846,6 @@ export class PiRpcConnection implements AgentConnection {
       id: request.steerId,
       run,
       applied: deferred<void>(),
-      acknowledged: deferred<void>(),
     };
     this.pendingSteer = pending;
     try {
@@ -861,11 +858,9 @@ export class PiRpcConnection implements AgentConnection {
             content: [{ type: "text", text: message }, ...images],
           }),
       });
-      pending.acknowledged.resolve();
       await pending.applied.promise;
       return { outcome: "injected" } as T;
     } finally {
-      pending.acknowledged.resolve();
       if (this.pendingSteer === pending) this.pendingSteer = undefined;
     }
   };
@@ -878,6 +873,7 @@ export function initializeResponse(): acp.InitializeResponse {
     agentCapabilities: {
       _meta: {
         lody: {
+          mcp: { version: 1, supported: false },
           steering: {
             version: 1,
             transport: "request",

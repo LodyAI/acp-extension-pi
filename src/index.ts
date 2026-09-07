@@ -8,7 +8,6 @@ const server = serve(
 );
 for (const signal of ["SIGINT", "SIGTERM"] as const) {
   process.once(signal, () => {
-    server.close();
-    process.exit(0);
+    void server.close().finally(() => process.exit(0));
   });
 }

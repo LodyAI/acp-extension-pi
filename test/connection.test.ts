@@ -61,6 +61,7 @@ function peer() {
     emit({ type: "agent_settled" });
     reply(request);
   };
+  let onClearQueue = (request: Record<string, unknown>) => reply(request, {});
   function reply(
     request: Record<string, unknown>,
     data?: unknown,
@@ -126,9 +127,11 @@ function peer() {
         case "abort":
           onAbort(request);
           break;
-        case "clear_queue":
         case "compact":
           reply(request, {});
+          break;
+        case "clear_queue":
+          onClearQueue(request);
           break;
         case "extension_ui_response":
           replies.push(request);
@@ -186,6 +189,9 @@ function peer() {
     accepted,
     setAbort: (handler: typeof onAbort) => {
       onAbort = handler;
+    },
+    setClearQueue: (handler: typeof onClearQueue) => {
+      onClearQueue = handler;
     },
     setPrompt: (handler: typeof onPrompt) => {
       onPrompt = handler;
@@ -422,6 +428,11 @@ describe("native Pi connection", () => {
   it("clears a steer stranded at natural settlement before allowing the next prompt", async () => {
     const p = peer();
     await start(p);
+    let stranded = true;
+    p.setClearQueue((request) => {
+      stranded = false;
+      p.reply(request, {});
+    });
     const done = p.client.prompt(prompt);
     await p.accepted.promise;
     const queued = deferred();
@@ -439,11 +450,17 @@ describe("native Pi connection", () => {
     p.emit({ type: "agent_settled" });
     await done;
     await rejected;
-    expect(p.commands.some((command) => command.type === "clear_queue")).toBe(
-      true,
-    );
+    p.setPrompt((request) => {
+      p.emit({ type: "agent_start" });
+      p.emit(text(stranded ? "old steer" : "new prompt"));
+      p.emit({ type: "agent_settled" });
+      p.reply(request);
+    });
     await expect(p.client.prompt(prompt)).resolves.toEqual({
       stopReason: "end_turn",
+    });
+    expect(p.updates.at(-1)).toMatchObject({
+      update: { content: { text: "new prompt" } },
     });
     p.close();
   });

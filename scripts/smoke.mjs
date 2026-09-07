@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { once } from "node:events";
+import { watch } from "node:fs";
 import { mkdtemp, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -12,6 +13,28 @@ const children = new Set();
 let toolStarted;
 let answerQuestion = async () => ({ action: "cancel" });
 const output = [];
+let processPid;
+let piPid;
+function readWhenWritten(path) {
+  return new Promise((resolve, reject) => {
+    const watcher = watch(root, () => void check());
+    const check = async () => {
+      try {
+        const value = await readFile(path, "utf8");
+        if (!value.trim()) return;
+        watcher.close();
+        resolve(value);
+      } catch (error) {
+        if (error?.code !== "ENOENT") {
+          watcher.close();
+          reject(error);
+        }
+      }
+    };
+    watcher.once("error", reject);
+    void check();
+  });
+}
 async function start(id) {
   const child = spawn(
     process.execPath,
@@ -59,6 +82,10 @@ async function start(id) {
     protocolVersion: 1,
     clientCapabilities: {},
   });
+  assert.deepEqual(info.agentCapabilities._meta.lody.mcp, {
+    version: 1,
+    supported: false,
+  });
   assert.equal(info.agentCapabilities._meta.lody.steering.version, 1);
   await assert.rejects(
     client.newSession({
@@ -75,9 +102,10 @@ async function start(id) {
   return {
     client,
     id: session.sessionId ?? id,
-    async stop() {
+    async stop(signal = false) {
       const exited = once(child, "exit");
-      child.stdin.end();
+      if (signal) child.kill("SIGTERM");
+      else child.stdin.end();
       await exited;
       children.delete(child);
     },
@@ -188,22 +216,43 @@ try {
     ).stopReason,
     "end_turn",
   );
-  const activeReady = new Promise((resolve) => {
-    toolStarted = resolve;
-  });
+  const fifo = join(root, "process.fifo");
+  assert.equal(spawnSync("mkfifo", [fifo]).status, 0);
+  const processReady = readWhenWritten(join(root, "process.pid"));
   const disconnected = b.client.prompt({
     sessionId: replacement.sessionId,
-    prompt: [{ type: "text", text: "gate fixture" }],
+    prompt: [{ type: "text", text: "process fixture" }],
   });
   const rejectedOnDisconnect = assert.rejects(disconnected);
-  await activeReady;
-  await b.stop();
+  processPid = Number((await processReady).trim());
+  piPid = Number((await readFile(join(root, "pi.pid"), "utf8")).trim());
+  assert(Number.isSafeInteger(processPid) && processPid > 1);
+  assert(Number.isSafeInteger(piPid) && piPid > 1);
+  await b.stop(true);
   await rejectedOnDisconnect;
+  assert.equal(
+    await readFile(join(root, "shutdown-observed"), "utf8"),
+    "yes\n",
+  );
+  assert.throws(() => process.kill(processPid, 0), { code: "ESRCH" });
+  assert.throws(() => process.kill(piPid, 0), { code: "ESRCH" });
   assert(output.some((text) => text.startsWith("Pi session usage:")));
   console.log(
-    "PASS: ACP executable, MCP refusal, file tool, input command, elicitation cancellation, stats, tool cancellation, active-tool stdin shutdown, native restart/resume, failed replacement isolation and recovery.",
+    "PASS: ACP executable, MCP refusal, file tool, input command, elicitation cancellation, stats, tool cancellation, process-tree signal shutdown, native restart/resume, failed replacement isolation and recovery.",
   );
   console.log(`Synthetic artifacts: ${root}`);
 } finally {
   for (const child of children) child.kill();
+  if (processPid)
+    try {
+      process.kill(-processPid, "SIGKILL");
+    } catch {
+      /* Already exited. */
+    }
+  if (piPid)
+    try {
+      process.kill(-piPid, "SIGKILL");
+    } catch {
+      /* Already exited. */
+    }
 }

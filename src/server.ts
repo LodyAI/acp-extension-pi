@@ -13,31 +13,73 @@ import {
 } from "acp-extension-core";
 import { PiRpcConnection, initializeResponse } from "./connection.js";
 
+const SHUTDOWN_GRACE_MS = 1_000;
+
+function waitForExit(child: ChildProcess): Promise<boolean> {
+  if (child.exitCode !== null || child.signalCode !== null)
+    return Promise.resolve(true);
+  return new Promise((resolve) => {
+    const timeout = setTimeout(() => {
+      child.off("exit", exited);
+      resolve(false);
+    }, SHUTDOWN_GRACE_MS);
+    const exited = () => {
+      clearTimeout(timeout);
+      resolve(true);
+    };
+    child.once("exit", exited);
+  });
+}
+
 /** One runtime per ACP connection; Pi owns its native files and tool processes. */
 export function serve(stream: Stream, piArgs: string[] = []) {
   let child: ChildProcess | undefined;
   let runtime: Promise<PiRpcConnection> | undefined;
   let cwd: string | undefined;
-  let closed = false;
-  const close = () => {
-    if (closed) return;
-    closed = true;
-    if (!child?.pid) return;
-    if (process.platform === "win32") {
-      spawn("taskkill", ["/pid", String(child.pid), "/T", "/F"], {
-        stdio: "ignore",
-      }).on("error", () => child?.kill());
-    } else {
-      try {
-        process.kill(-child.pid, "SIGKILL");
-      } catch {
-        /* Already exited. */
+  let closing: Promise<void> | undefined;
+  const close = (): Promise<void> => {
+    if (closing) return closing;
+    closing = (async () => {
+      const owned = child;
+      if (!owned?.pid || owned.exitCode !== null || owned.signalCode !== null)
+        return;
+      if (process.platform === "win32") owned.stdin?.end();
+      else {
+        // Pi's SIGTERM handler stops tracked detached tools before awaiting shutdown hooks.
+        try {
+          process.kill(-owned.pid, "SIGTERM");
+        } catch {
+          /* Already exited. */
+        }
       }
-    }
+      if (await waitForExit(owned)) return;
+      if (process.platform === "win32") {
+        await new Promise<void>((resolve) => {
+          const killer = spawn(
+            "taskkill",
+            ["/pid", String(owned.pid), "/T", "/F"],
+            { stdio: "ignore" },
+          );
+          killer.once("error", () => {
+            owned.kill();
+            resolve();
+          });
+          killer.once("exit", () => resolve());
+        });
+      } else {
+        try {
+          process.kill(-owned.pid, "SIGKILL");
+        } catch {
+          /* Already exited. */
+        }
+      }
+      await waitForExit(owned);
+    })();
+    return closing;
   };
   const connection = new AgentSideConnection((client): Agent => {
     const get = async (directory?: string) => {
-      if (closed) throw new Error("ACP connection closed");
+      if (closing) throw new Error("ACP connection closed");
       if (runtime) {
         if (directory && directory !== cwd)
           throw RequestError.invalidRequest(
@@ -74,7 +116,7 @@ export function serve(stream: Stream, piArgs: string[] = []) {
           detached: process.platform !== "win32",
         },
       );
-      child.once("exit", close);
+      child.once("exit", () => void close());
       child.stderr!.pipe(process.stderr, { end: false });
       const pi = new PiRpcConnection(
         {
@@ -136,6 +178,8 @@ export function serve(stream: Stream, piArgs: string[] = []) {
         (await get()).request(normalizeLodyExtensionMethod(method), params),
     };
   }, stream);
-  connection.signal.addEventListener("abort", close, { once: true });
+  connection.signal.addEventListener("abort", () => void close(), {
+    once: true,
+  });
   return { connection, close };
 }
