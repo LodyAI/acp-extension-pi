@@ -15,7 +15,9 @@ The adapter uses the shared `acp-extension-core` contract and pinned
 `@earendil-works/pi-coding-agent@0.85.1`. It does not depend on the Lody workspace.
 Pi owns model execution, tools and native session files. ACP session ids are those
 file paths; resume switches to the same file without replay or a second id map.
-One ACP connection owns one Pi process and working directory.
+One ACP connection owns one Pi process and working directory. Session replacement
+and configuration exclude concurrent prompts; a failed replacement invalidates the
+old identity. Clients must create or resume a session before sending further input.
 
 ## Run from source
 
@@ -80,7 +82,8 @@ Unit tests cover framing/correlation, lifecycle settlement, retry, cancellation,
 EOF, repeated steering identities and output order, native resume, model configuration,
 usage and interactive input. The executable smoke uses a real pinned Pi runtime
 with a synthetic offline provider: actual file write, input commands, questions,
-stats, tool cancellation, ACP stdin shutdown and process restart/native resume.
+stats, tool cancellation, ACP stdin shutdown during a running tool, process restart/
+native resume, and failed session replacement with explicit recovery.
 It requires no provider credentials or network calls after dependency installation.
 Temporary synthetic artifacts are retained at the printed path.
 

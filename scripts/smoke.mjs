@@ -113,10 +113,55 @@ try {
     ).stopReason,
     "end_turn",
   );
+  await assert.rejects(
+    b.client.newSession({
+      cwd: root,
+      mcpServers: [],
+      _meta: {
+        lody: {
+          sessionConfig: { configOptionValues: { model: "missing/model" } },
+        },
+      },
+    }),
+    {
+      code: -32603,
+      data: { details: "Pi model is unavailable: missing/model" },
+    },
+  );
+  await assert.rejects(
+    b.client.prompt({
+      sessionId: b.id,
+      prompt: [{ type: "text", text: "must not enter replacement" }],
+    }),
+    {
+      code: -32603,
+      data: { details: "Pi session does not match the active session" },
+    },
+  );
+  const replacement = await b.client.newSession({ cwd: root, mcpServers: [] });
+  assert.equal(
+    (
+      await b.client.prompt({
+        sessionId: replacement.sessionId,
+        prompt: [{ type: "text", text: "continue after failed setup" }],
+      })
+    ).stopReason,
+    "end_turn",
+  );
+  const activeReady = new Promise((resolve) => {
+    toolStarted = resolve;
+  });
+  const disconnected = b.client.prompt({
+    sessionId: replacement.sessionId,
+    prompt: [{ type: "text", text: "gate fixture" }],
+  });
+  const rejectedOnDisconnect = assert.rejects(disconnected);
+  await activeReady;
   await b.stop();
+  await rejectedOnDisconnect;
   assert(output.some((text) => text.startsWith("Pi session usage:")));
   console.log(
-    "PASS: ACP executable, MCP refusal, file tool, input command, elicitation cancellation, stats, tool cancellation, stdin shutdown and native restart/resume.",
+    "PASS: ACP executable, MCP refusal, file tool, input command, elicitation cancellation, stats, tool cancellation, active-tool stdin shutdown, native restart/resume, failed replacement isolation and recovery.",
   );
   console.log(`Synthetic artifacts: ${root}`);
 } finally {

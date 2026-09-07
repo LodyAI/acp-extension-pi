@@ -12,6 +12,9 @@ Lody workspace packages or fork its session executor here.
 - Steering is applied only on the matching custom-message metadata, never by text.
   Send the Core applied notification before later session updates. The ACP client
   owns its output/application barrier. Preserve provable idle refusal for requeue.
+- Session replacement and model/configuration changes exclude concurrent prompts
+  and other configuration operations. Clear native identity before replacement and
+  on replacement failure; never allow an old or empty id to address the new file.
 - stdout is exclusively ACP. Diagnostics belong on stderr. Close the owned Pi
   process tree when the ACP transport closes; never silently retry a prompt.
 - Advertise only implemented capabilities. MCP, permission modes, native history
@@ -19,6 +22,9 @@ Lody workspace packages or fork its session executor here.
 - Use shared `acp-extension-core` contracts, not copied protocol definitions.
 - Tests use synthetic inputs and explicit signals; no sleeps or commercial models
   in CI. Never commit credentials, real transcripts or temporary validation data.
+
+Implementation changes go through a Draft PR. Do not push implementation directly
+to the default branch without an explicit request to bypass PR review.
 
 Run `pnpm install`, `pnpm check`, `pnpm build`, and `pnpm smoke` before committing.
 Keep the adaptation small and remove duplicate or implementation-only tests.

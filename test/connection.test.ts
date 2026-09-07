@@ -75,6 +75,13 @@ function peer() {
       error,
     });
   }
+  let onSession = (request: Record<string, unknown>) =>
+    reply(request, { cancelled: false });
+  let onModel = (request: Record<string, unknown>) => {
+    state.model = { ...model, id: String(request.modelId) };
+    state.thinkingLevel = "off";
+    reply(request, state.model);
+  };
   const writable = new WritableStream<Uint8Array>({
     write(bytes) {
       const request: Record<string, unknown> = JSON.parse(
@@ -84,7 +91,7 @@ function peer() {
       switch (request.type) {
         case "new_session":
         case "switch_session":
-          reply(request, { cancelled: false });
+          onSession(request);
           break;
         case "get_state":
           reply(request, state);
@@ -106,9 +113,7 @@ function peer() {
           });
           break;
         case "set_model":
-          state.model = { ...model, id: String(request.modelId) };
-          state.thinkingLevel = "off";
-          reply(request, state.model);
+          onModel(request);
           break;
         case "set_thinking_level":
           state.thinkingLevel = String(request.level);
@@ -156,6 +161,12 @@ function peer() {
     }),
   };
   return {
+    setSession(handler: typeof onSession) {
+      onSession = handler;
+    },
+    setModel(handler: typeof onModel) {
+      onModel = handler;
+    },
     get client() {
       return (client ??= new PiRpcConnection(stream, host));
     },
@@ -196,6 +207,96 @@ const text = (value: string) => ({
 });
 
 describe("native Pi connection", () => {
+  it("does not start a prompt midway through model configuration", async () => {
+    const p = peer();
+    await p.client.initialize({ protocolVersion: 1 });
+    await p.client.newSession({ cwd: "/work", mcpServers: [] });
+    const entered = deferred<Record<string, unknown>>();
+    p.setModel((request) => entered.resolve(request));
+    const setting = p.client.setSessionConfigOption({
+      sessionId: prompt.sessionId,
+      configId: "model",
+      value: "fixture/two",
+    });
+    const command = await entered.promise;
+    const turn = p.client.prompt(prompt).then(
+      () => "completed",
+      () => "refused",
+    );
+    const verdict = await Promise.race([
+      turn,
+      p.promptReceived.promise.then(() => "sent mid-configuration"),
+    ]);
+    if (verdict !== "refused") p.emit({ type: "agent_settled" });
+    p.state.model = { ...model, id: "two" };
+    p.reply(command, p.state.model);
+    await Promise.all([turn, setting]);
+    p.close();
+    expect(verdict).toBe("refused");
+  });
+
+  it("invalidates old identity when replacement startup configuration fails", async () => {
+    const p = peer();
+    await p.client.initialize({ protocolVersion: 1 });
+    await p.client.newSession({ cwd: "/work", mcpServers: [] });
+    p.setSession((request) => {
+      p.state.sessionFile = "/work/next.jsonl";
+      p.reply(request, { cancelled: false });
+    });
+    await expect(
+      p.client.newSession({
+        cwd: "/work",
+        mcpServers: [],
+        _meta: {
+          lody: {
+            sessionConfig: { configOptionValues: { model: "missing/model" } },
+          },
+        },
+      }),
+    ).rejects.toThrow("unavailable");
+    await expect(p.client.prompt({ ...prompt, sessionId: "" })).rejects.toThrow(
+      "does not match",
+    );
+    const oldTurn = p.client.prompt(prompt).then(
+      () => "completed",
+      () => "refused",
+    );
+    const verdict = await Promise.race([
+      oldTurn,
+      p.promptReceived.promise.then(() => "sent to replaced session"),
+    ]);
+    if (verdict !== "refused") p.emit({ type: "agent_settled" });
+    await oldTurn;
+    p.close();
+    expect(verdict).toBe("refused");
+  });
+
+  it("refuses an old-session prompt while native session replacement is in flight", async () => {
+    const p = peer();
+    await p.client.initialize({ protocolVersion: 1 });
+    await p.client.newSession({ cwd: "/work", mcpServers: [] });
+    const entered = deferred<Record<string, unknown>>();
+    p.setSession((request) => {
+      p.state.sessionFile = "/work/next.jsonl";
+      entered.resolve(request);
+    });
+    const replacing = p.client.newSession({ cwd: "/work", mcpServers: [] });
+    const command = await entered.promise;
+    const oldTurn = p.client.prompt(prompt).then(
+      () => "completed",
+      () => "refused",
+    );
+    const verdict = await Promise.race([
+      oldTurn,
+      p.promptReceived.promise.then(() => "sent to replaced session"),
+    ]);
+    if (verdict !== "refused") p.emit({ type: "agent_settled" });
+    p.reply(command, { cancelled: false });
+    await Promise.all([oldTurn, replacing]);
+    p.close();
+    expect(verdict).toBe("refused");
+  });
+
   it("hands off a steer only when its tagged message is applied, before any following output", async () => {
     const p = peer();
     await start(p);

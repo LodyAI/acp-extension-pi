@@ -111,6 +111,7 @@ export class PiRpcConnection implements AgentConnection {
   private cwd = "";
   private model?: z.infer<typeof modelSchema>;
   private active?: Run;
+  private configuring = false;
   private steeringReady = false;
   private pendingSteer?: {
     id: string;
@@ -142,38 +143,40 @@ export class PiRpcConnection implements AgentConnection {
   };
 
   newSession: AgentConnection["newSession"] = async (request) => {
-    this.assertIdle();
-    this.cwd = request.cwd;
-    const result = z
-      .object({ cancelled: z.boolean() })
-      .parse(await this.rpc.request("new_session"));
-    if (result.cancelled)
-      throw new Error("Pi extension cancelled session creation");
-    return this.prepare(request._meta);
+    return this.configure(async () => {
+      this.cwd = request.cwd;
+      const result = z
+        .object({ cancelled: z.boolean() })
+        .parse(await this.rpc.request("new_session"));
+      if (result.cancelled)
+        throw new Error("Pi extension cancelled session creation");
+      return this.prepare(request._meta);
+    }, true);
   };
 
   resumeSession: AgentConnection["resumeSession"] = async (request) => {
-    this.assertIdle();
-    this.cwd = request.cwd;
-    if (
-      !path.isAbsolute(request.sessionId) ||
-      !request.sessionId.endsWith(".jsonl")
-    ) {
-      throw new Error(
-        "Pi resume requires its native session file; pi-acp ids cannot be migrated automatically",
+    return this.configure(async () => {
+      this.cwd = request.cwd;
+      if (
+        !path.isAbsolute(request.sessionId) ||
+        !request.sessionId.endsWith(".jsonl")
+      ) {
+        throw new Error(
+          "Pi resume requires its native session file; pi-acp ids cannot be migrated automatically",
+        );
+      }
+      const result = z.object({ cancelled: z.boolean() }).parse(
+        await this.rpc.request("switch_session", {
+          sessionPath: request.sessionId,
+        }),
       );
-    }
-    const result = z.object({ cancelled: z.boolean() }).parse(
-      await this.rpc.request("switch_session", {
-        sessionPath: request.sessionId,
-      }),
-    );
-    if (result.cancelled)
-      throw new Error("Pi extension cancelled session resume");
-    const response = await this.prepare(request._meta);
-    if (response.sessionId !== request.sessionId)
-      throw new Error("Pi resumed a different session file");
-    return response;
+      if (result.cancelled)
+        throw new Error("Pi extension cancelled session resume");
+      const response = await this.prepare(request._meta);
+      if (response.sessionId !== request.sessionId)
+        throw new Error("Pi resumed a different session file");
+      return response;
+    }, true);
   };
 
   private async prepare(meta: unknown): Promise<acp.NewSessionResponse> {
@@ -267,11 +270,12 @@ export class PiRpcConnection implements AgentConnection {
     request,
   ) => {
     this.assertSession(request.sessionId);
-    this.assertIdle();
-    if (typeof request.value !== "string")
-      throw new Error("Pi configuration requires a select value");
-    await this.setOption(request.configId, request.value);
-    return { configOptions: await this.configOptions() };
+    return this.configure(async () => {
+      if (typeof request.value !== "string")
+        throw new Error("Pi configuration requires a select value");
+      await this.setOption(request.configId, request.value);
+      return { configOptions: await this.configOptions() };
+    });
   };
 
   prompt: AgentConnection["prompt"] = async (request) => {
@@ -727,11 +731,33 @@ export class PiRpcConnection implements AgentConnection {
     });
   }
 
+  private async configure<T>(
+    action: () => Promise<T>,
+    replaceSession = false,
+  ): Promise<T> {
+    this.assertIdle();
+    this.configuring = true;
+    // A replacement can change Pi's durable identity before its ACK or config succeeds.
+    // Never let an old ACP id address that new file, including after failure.
+    if (replaceSession) this.sessionId = "";
+    try {
+      return await action();
+    } catch (error) {
+      if (replaceSession) this.sessionId = "";
+      throw error;
+    } finally {
+      this.configuring = false;
+    }
+  }
+
   private assertIdle(): void {
-    if (this.active) throw new Error("Pi already has an active prompt");
+    if (this.active || this.configuring)
+      throw new Error(
+        "Pi already has an active prompt or configuration operation",
+      );
   }
   private assertSession(id: string): void {
-    if (id !== this.sessionId)
+    if (!this.sessionId || id !== this.sessionId)
       throw new Error("Pi session does not match the active session");
   }
 
