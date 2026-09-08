@@ -54,6 +54,8 @@ export default function (pi) {
       const stream = createAssistantMessageEventStream();
       const last = context.messages.at(-1);
       const input = JSON.stringify(last?.content);
+      if (last?.role === "user" && input.includes("content fixture"))
+        writeFileSync("content-observed.json", JSON.stringify(last.content));
       const mcpTool =
         last?.role === "user" &&
         input.match(/mcp fixture (echo|wait|error|image)/)?.[1];

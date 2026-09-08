@@ -16,4 +16,6 @@ jobs:
       - run: pnpm check
       - run: pnpm build
       - run: pnpm smoke
-      - run: pnpm pack
+      - run: pnpm pack --pack-destination "$RUNNER_TEMP/pi-package"
+      - run: npm install --prefix "$RUNNER_TEMP/pi-install" --omit=dev "$RUNNER_TEMP"/pi-package/*.tgz
+      - run: node scripts/smoke.mjs "$RUNNER_TEMP/pi-install/node_modules/acp-extension-pi/dist/index.js"

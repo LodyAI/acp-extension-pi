@@ -113,10 +113,12 @@ After compaction, Pi reports context occupancy as unknown until a later model
 response. The adapter does not invent a zero or reuse pre-compaction usage as a
 new measurement. Current Lody accepts only numeric occupancy updates, however, so
 its UI retains the previous percentage during this interval. That Host limitation
-is **not resolved** by the activity indicator. Also, the inspected Lody usage
-persistence path accepts managed builtins only; custom-agent setup verifies the
-wire snapshots and `/stats`, not integrated billing display. These consumer and
-publication dependencies remain tracked in [Lody #451](https://github.com/LodyAI/Lody/issues/451).
+is a later display improvement, not a V1 requirement to invent an exact count.
+The current custom-command setup verifies wire snapshots and `/stats`. Full cost
+display must be accepted after Pi's planned managed builtin registration through
+Lody's existing reporting path. Generic custom-agent accounting is outside this
+PR; no change to the Host's builtin admission policy is proposed. Release and
+integration acceptance remain tracked in [Lody #451](https://github.com/LodyAI/Lody/issues/451).
 
 ## Verification
 
@@ -126,10 +128,18 @@ pnpm build
 pnpm smoke
 ```
 
+CI also packs the adapter, installs the tarball into an isolated directory with
+production dependencies, and runs the same smoke against its installed entry:
+
+```sh
+node scripts/smoke.mjs /absolute/install/node_modules/acp-extension-pi/dist/index.js
+```
+
 Unit tests cover framing/correlation, lifecycle settlement, retry, cancellation,
 EOF, repeated steering identities and output order, native resume, model configuration,
 usage and interactive input. The executable smoke uses a real pinned Pi runtime
-with a synthetic offline provider: actual file write, input commands, questions,
+with a synthetic offline provider: text/image/file-context delivery to the model,
+rejected binary input followed by a successful turn, actual file write, input commands, questions,
 stats, stdio MCP text/image/structured/error results, cancellation, changed server
 configuration on resume/replacement, failed MCP setup, empty-selection removal,
 MCP process/configuration cleanup, adapter signal shutdown with a real bash process, process

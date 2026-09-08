@@ -46,7 +46,8 @@ async function start(id, mcpServers = []) {
   const child = spawn(
     process.execPath,
     [
-      fileURLToPath(new URL("../dist/index.js", import.meta.url)),
+      process.argv[2] ??
+        fileURLToPath(new URL("../dist/index.js", import.meta.url)),
       "--provider",
       "lody-fixture",
       "--model",
@@ -143,6 +144,63 @@ try {
   const a = await start(undefined, mcpServers);
   const prompt = (text) =>
     a.client.prompt({ sessionId: a.id, prompt: [{ type: "text", text }] });
+  const image = {
+    type: "image",
+    mimeType: "image/png",
+    data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl6hS8AAAAASUVORK5CYII=",
+  };
+  await a.client.prompt({
+    sessionId: a.id,
+    prompt: [
+      { type: "text", text: "content fixture" },
+      image,
+      {
+        type: "resource_link",
+        name: "fixture.txt",
+        uri: "file:///fixture.txt",
+      },
+      {
+        type: "resource",
+        resource: { uri: "file:///context.txt", text: "embedded context" },
+      },
+    ],
+  });
+  const observed = JSON.parse(
+    await readFile(join(root, "content-observed.json"), "utf8"),
+  );
+  assert.deepEqual(
+    observed.filter((block) => block.type === "image"),
+    [image],
+  );
+  const observedText = observed
+    .filter((block) => block.type === "text")
+    .map((block) => block.text)
+    .join("\n");
+  for (const text of [
+    "content fixture",
+    "fixture.txt",
+    "file:///fixture.txt",
+    "file:///context.txt",
+    "embedded context",
+  ])
+    assert(observedText.includes(text));
+  await assert.rejects(
+    a.client.prompt({
+      sessionId: a.id,
+      prompt: [
+        {
+          type: "resource",
+          resource: { uri: "file:///binary.bin", blob: "AA==" },
+        },
+      ],
+    }),
+    {
+      data: {
+        details:
+          "Pi does not support embedded binary resources; attach an image or a file link",
+      },
+    },
+  );
   await prompt("mcp fixture echo");
   assert(output.some((text) => text.includes("MCP:initial:native-value")));
   assert(output.some((text) => text.includes('\\"tag\\":\\"initial\\"')));
