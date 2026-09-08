@@ -1,7 +1,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { Readable, Writable } from "node:stream";
 import { fileURLToPath } from "node:url";
-import { mkdtempSync, writeFileSync, renameSync, rmSync } from "node:fs";
+import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -140,13 +140,11 @@ export function serve(stream: Stream, piArgs: string[] = []) {
         },
         {
           configureMcp: async (servers) => {
-            // Called only inside PiRpcConnection's existing configuration exclusion.
+            // Configuration exclusion keeps this write before the next runtime loads it.
             if (closing) throw new Error("ACP connection closed");
-            const pendingPath = configPath + ".pending";
-            writeFileSync(pendingPath, JSON.stringify(servers), {
+            writeFileSync(configPath, JSON.stringify(servers), {
               mode: 0o600,
             });
-            renameSync(pendingPath, configPath);
           },
           update: (notification) => client.sessionUpdate(notification),
           // Notifications are sent in Pi event order. Lody owns the application lease

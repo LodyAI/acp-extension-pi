@@ -77,7 +77,7 @@ are represented as JSON text rather than discarded. Cancellation requests do not
 promise rollback of a server's side effects.
 
 Each new/resumed session uses that ACP request's server configuration. The adapter
-atomically stages it in a private temporary file under its existing configuration
+writes it to a private temporary file under its existing configuration
 exclusion; Pi reloads it with the extension. Setup fails unless the extension is
 ready, including after partial server failure. This file is only a runtime handoff,
 not session identity or durable settings, and normal shutdown removes it. Abrupt

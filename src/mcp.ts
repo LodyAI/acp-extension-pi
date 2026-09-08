@@ -6,7 +6,10 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
-import { CallToolResultSchema } from "@modelcontextprotocol/sdk/types.js";
+import {
+  CallToolResultSchema,
+  type CallToolResult,
+} from "@modelcontextprotocol/sdk/types.js";
 
 export const MCP_CONFIG_ENV = "LODY_PI_MCP_CONFIG";
 type StdioServer = Extract<McpServer, { command: string }>;
@@ -68,16 +71,15 @@ export async function registerMcpTools(pi: ExtensionAPI): Promise<void> {
             description: tool.description ?? tool.name,
             parameters: tool.inputSchema as ToolDefinition["parameters"],
             async execute(_id, args, signal) {
-              const result = CallToolResultSchema.parse(
-                await client.callTool(
-                  {
-                    name: tool.name,
-                    arguments: args as Record<string, unknown>,
-                  },
-                  CallToolResultSchema,
-                  { signal },
-                ),
-              );
+              // The SDK validates this schema but types the result as a compatibility union.
+              const result = (await client.callTool(
+                {
+                  name: tool.name,
+                  arguments: args as Record<string, unknown>,
+                },
+                CallToolResultSchema,
+                { signal },
+              )) as CallToolResult;
               const content = result.content.map((block) =>
                 block.type === "text" || block.type === "image"
                   ? block
