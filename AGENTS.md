@@ -27,6 +27,9 @@ Lody workspace packages or fork its session executor here.
 - Advertise only implemented capabilities. Permission modes, native history import
   and TUI replacement are not implemented.
 - Use shared `acp-extension-core` contracts, not copied protocol definitions.
+- Pi session stats own cumulative usage, including compaction. Do not infer model
+  attribution for summary/tool charges or turn unknown context occupancy into zero.
+  Activity notifications describe Pi operations; they never own run completion.
 - Tests use synthetic inputs and explicit signals; no sleeps or commercial models
   in CI. Never commit credentials, real transcripts or temporary validation data.
 

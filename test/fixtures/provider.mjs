@@ -81,6 +81,7 @@ export default function (pi) {
       queueMicrotask(() => {
         stream.push({ type: "start", partial: message });
         if (
+          context.tools?.length &&
           last?.role === "user" &&
           (mcpTool ||
             input.includes("write fixture") ||

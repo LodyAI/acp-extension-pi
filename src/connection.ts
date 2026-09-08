@@ -1,9 +1,11 @@
 import path from "node:path";
+import { randomUUID } from "node:crypto";
 import * as acp from "@agentclientprotocol/sdk";
 import { z } from "zod";
 
 import {
   LODY_EXTENSION_METHODS,
+  type LodyActivityMeta,
   type SessionUsageUpdate,
 } from "acp-extension-core";
 import type { AgentConnection, PiStream } from "./types.js";
@@ -90,6 +92,7 @@ function deferred<T>() {
   return { promise, resolve, reject };
 }
 type Run = ReturnType<typeof deferred<acp.PromptResponse>> & {
+  activities: Map<string, { id: string; meta: LodyActivityMeta }>;
   finished: ReturnType<typeof deferred<void>>;
   cancellation?: Promise<void>;
   started: boolean;
@@ -200,6 +203,7 @@ export class PiRpcConnection implements AgentConnection {
       }
     }
     const configOptions = await this.configOptions();
+    await this.reportUsage();
     return { sessionId: this.sessionId, configOptions };
   }
 
@@ -284,7 +288,9 @@ export class PiRpcConnection implements AgentConnection {
       if (typeof request.value !== "string")
         throw new Error("Pi configuration requires a select value");
       await this.setOption(request.configId, request.value);
-      return { configOptions: await this.configOptions() };
+      const configOptions = await this.configOptions();
+      await this.reportUsage();
+      return { configOptions };
     });
   };
 
@@ -295,6 +301,7 @@ export class PiRpcConnection implements AgentConnection {
     const { message, images } = this.promptContent(request.prompt);
     const run: Run = {
       ...deferred<acp.PromptResponse>(),
+      activities: new Map(),
       finished: deferred<void>(),
       started: false,
       settled: false,
@@ -303,9 +310,8 @@ export class PiRpcConnection implements AgentConnection {
     this.active = run;
     try {
       if (message.trim() === "/stats" && images.length === 0) {
-        const stats = statsSchema.parse(
-          await this.rpc.request("get_session_stats"),
-        );
+        const stats = await this.reportUsage();
+        if (!stats) throw new Error("Pi session usage is unavailable");
         await this.update({
           sessionUpdate: "agent_message_chunk",
           content: {
@@ -314,13 +320,27 @@ export class PiRpcConnection implements AgentConnection {
           },
         });
         run.resolve({ stopReason: "end_turn" });
-      } else if (message.trim() === "/compact" && images.length === 0) {
-        await this.rpc.request("compact");
-        await this.update({
-          sessionUpdate: "agent_message_chunk",
-          content: { type: "text", text: "Context compacted." },
-        });
-        run.resolve({ stopReason: "end_turn" });
+      } else if (
+        /^\/compact(?:\s|$)/.test(message.trim()) &&
+        images.length === 0
+      ) {
+        try {
+          await this.rpc.request("compact", {
+            customInstructions:
+              message.trim().slice("/compact".length).trim() || undefined,
+          });
+        } catch (error) {
+          if (!run.cancelled) throw error;
+        } finally {
+          await this.rpc.drain();
+          await this.reportUsage();
+        }
+        if (!run.cancelled)
+          await this.update({
+            sessionUpdate: "agent_message_chunk",
+            content: { type: "text", text: "Context compacted." },
+          });
+        run.resolve({ stopReason: run.cancelled ? "cancelled" : "end_turn" });
       } else {
         await this.rpc.request("prompt", {
           message,
@@ -362,6 +382,12 @@ export class PiRpcConnection implements AgentConnection {
       return await run.promise;
     } finally {
       await run.cancellation?.catch(() => undefined);
+      for (const key of run.activities.keys())
+        await this.endActivity(
+          run,
+          key,
+          run.cancelled ? "Cancelled" : "Pi ended without an activity result",
+        ).catch(() => undefined);
       await this.cancelQuestions().catch(() => undefined);
       if (this.active === run) this.active = undefined;
       run.finished.resolve();
@@ -483,18 +509,20 @@ export class PiRpcConnection implements AgentConnection {
     }
     const run = this.active;
     if (!run || run.settled) return;
+    // Pi creates cancellation controllers after asynchronous preflight. An early
+    // abort may see idle; repeat it when either native operation actually starts.
+    if (
+      run.cancelled &&
+      (event.type === "agent_start" || event.type === "compaction_start")
+    )
+      void this.cancelRun(run, true).catch((error: unknown) =>
+        run.reject(
+          error instanceof Error ? error : new Error("Pi cancellation failed"),
+        ),
+      );
     switch (event.type) {
       case "agent_start":
         run.started = true;
-        // Cancellation may have arrived while Pi was still in asynchronous prompt preflight.
-        if (run.cancelled)
-          void this.cancelRun(run, true).catch((error: unknown) =>
-            run.reject(
-              error instanceof Error
-                ? error
-                : new Error("Pi cancellation failed"),
-            ),
-          );
         break;
       case "agent_settled": {
         if (!run.started) break;
@@ -609,13 +637,121 @@ export class PiRpcConnection implements AgentConnection {
       case "tool_execution_end":
         await this.tool(event);
         break;
+      case "compaction_start":
+        await this.startActivity(run, "compaction", "Compact context", {
+          version: 1,
+          kind: "context_compaction",
+          automatic: event.reason !== "manual",
+        });
+        break;
+      case "compaction_end": {
+        const result = z
+          .object({
+            tokensBefore: z.number().nonnegative().optional(),
+            estimatedTokensAfter: z.number().nonnegative().optional(),
+          })
+          .optional()
+          .parse(event.result);
+        await this.endActivity(
+          run,
+          "summaryRetry",
+          event.aborted ? "Cancelled" : undefined,
+        );
+        await this.endActivity(
+          run,
+          "compaction",
+          event.aborted
+            ? "Cancelled"
+            : typeof event.errorMessage === "string"
+              ? event.errorMessage
+              : !result
+                ? "Compaction did not produce a summary"
+                : undefined,
+          {
+            usedTokensBefore: result?.tokensBefore,
+            usedTokensAfter: result?.estimatedTokensAfter,
+          },
+        );
+        break;
+      }
+      case "auto_retry_start":
+      case "summarization_retry_scheduled":
+        await this.startActivity(
+          run,
+          event.type === "auto_retry_start" ? "retry" : "summaryRetry",
+          `${event.type === "auto_retry_start" ? "Model retry" : "Summary retry wait"} ${event.attempt}/${event.maxAttempts}`,
+          { version: 1, kind: "retry", automatic: true },
+        );
+        break;
+      case "auto_retry_end":
+        await this.endActivity(
+          run,
+          "retry",
+          event.success
+            ? undefined
+            : String(event.finalError ?? "Retry failed"),
+        );
+        break;
+      case "summarization_retry_attempt_start":
+      case "summarization_retry_finished":
+        // This event ends the backoff, not the enclosing compaction operation.
+        await this.endActivity(
+          run,
+          "summaryRetry",
+          run.cancelled ? "Cancelled" : undefined,
+        );
+        break;
       case "extension_error":
         run.error = z.object({ error: z.string() }).parse(event).error;
         break;
     }
   }
 
-  private async reportUsage(): Promise<void> {
+  private async startActivity(
+    run: Run,
+    key: string,
+    title: string,
+    meta: LodyActivityMeta,
+  ) {
+    const existing = run.activities.get(key);
+    const activity = existing ?? { id: `pi-${key}-${randomUUID()}`, meta };
+    run.activities.set(key, activity);
+    await this.update({
+      sessionUpdate: existing ? "tool_call_update" : "tool_call",
+      toolCallId: activity.id,
+      title,
+      kind: "other",
+      status: "in_progress",
+      _meta: { lody: { activity: meta } },
+    });
+  }
+
+  private async endActivity(
+    run: Run,
+    key: string,
+    failureReason?: string,
+    details: Partial<LodyActivityMeta> = {},
+  ) {
+    const activity = run.activities.get(key);
+    if (!activity) return;
+    run.activities.delete(key);
+    await this.update({
+      sessionUpdate: "tool_call_update",
+      toolCallId: activity.id,
+      status: failureReason ? "failed" : "completed",
+      _meta: {
+        lody: {
+          activity: {
+            ...activity.meta,
+            ...details,
+            ...(failureReason ? { failureReason } : {}),
+          },
+        },
+      },
+    });
+  }
+
+  private async reportUsage() {
     // Pi owns the cumulative session total, including compaction and native resume.
     // Never feed per-message snapshots into the host's session-snapshot channel.
     const parsed = statsSchema.safeParse(
@@ -632,6 +768,9 @@ export class PiRpcConnection implements AgentConnection {
         cacheCreationInputTokens: tokens.cacheWrite,
         costUSD: cost,
       },
+      // Pi totals include tool and summary usage without model provenance. Omitting
+      // this field makes Lody attribute the entire total to the current model.
+      modelUsage: {},
     });
     if (contextUsage?.tokens != null)
       await this.update({
@@ -639,6 +778,7 @@ export class PiRpcConnection implements AgentConnection {
         size: contextUsage.contextWindow,
         used: contextUsage.tokens,
       });
+    return parsed.data;
   }
 
   private async contextUsage(used: number): Promise<void> {
@@ -920,6 +1060,8 @@ export function initializeResponse(): acp.InitializeResponse {
     agentCapabilities: {
       _meta: {
         lody: {
+          usage: { version: 1 },
+          compaction: { version: 1 },
           steering: {
             version: 1,
             transport: "request",

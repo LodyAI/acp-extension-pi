@@ -51,7 +51,9 @@ extension questions are interactive input, not permission approval or sandboxing
   extension queues a custom message with `details.steerId`. Only the matching
   `message_start` emits the Core applied notification. Repeated text is not identity.
   Idle/pre-start refusal lets the client keep input in its ordinary queue.
-- `/stats`, `/compact`, context usage and cumulative session usage notifications.
+- `/stats`, `/compact [instructions]`, context usage and cumulative session usage
+  notifications. Manual/automatic compaction and model retries use Core activity
+  metadata; summary retry waits are distinct from the enclosing compaction result.
 - Extension select/confirm/input/editor through ACP elicitation. Late answers cannot
   apply to a different turn; unsupported/out-of-turn questions are cancelled.
 
@@ -98,6 +100,23 @@ Permission modes, terminal-history import/discovery, session fork, TUI widgets,
 in-app OAuth and managed artifact publication are not implemented. Existing
 third-party `pi-acp` identities are not automatically migrated.
 Simultaneous terminal editing of an active native session file is not coordinated.
+
+Usage snapshots come from Pi `get_session_stats`, including native history and
+summary/tool charges. They refresh on new/resume, configuration changes, `/stats`,
+manual compaction (including failure/cancel), and agent settlement. They are
+cumulative snapshots, not deltas. Pi does not attach model provenance to all these
+charges, so the adapter sends an explicit empty `modelUsage` breakdown rather than
+letting the host assign the whole session to the current model. Per-model billing
+is not implemented.
+
+After compaction, Pi reports context occupancy as unknown until a later model
+response. The adapter does not invent a zero or reuse pre-compaction usage as a
+new measurement. Current Lody accepts only numeric occupancy updates, however, so
+its UI retains the previous percentage during this interval. That Host limitation
+is **not resolved** by the activity indicator. Also, the inspected Lody usage
+persistence path accepts managed builtins only; custom-agent setup verifies the
+wire snapshots and `/stats`, not integrated billing display. These consumer and
+publication dependencies remain tracked in [Lody #451](https://github.com/LodyAI/Lody/issues/451).
 
 ## Verification
 

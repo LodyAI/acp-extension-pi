@@ -1,7 +1,7 @@
 import type { PiStream } from "../src/types.js";
 import { describe, expect, it } from "vitest";
 import type * as acp from "@agentclientprotocol/sdk";
-import { PiRpcConnection } from "../src/connection.js";
+import { PiRpcConnection, initializeResponse } from "../src/connection.js";
 import {
   LODY_EXTENSION_METHODS,
   type SessionUsageUpdate,
@@ -62,6 +62,7 @@ function peer() {
     reply(request);
   };
   let onClearQueue = (request: Record<string, unknown>) => reply(request, {});
+  let onCompact = (request: Record<string, unknown>) => reply(request, {});
   let onStats = (request: Record<string, unknown>) =>
     reply(request, {
       tokens: { input: 20, output: 10, cacheRead: 4, cacheWrite: 2 },
@@ -137,7 +138,7 @@ function peer() {
           onAbort(request);
           break;
         case "compact":
-          reply(request, {});
+          onCompact(request);
           break;
         case "clear_queue":
           onClearQueue(request);
@@ -174,6 +175,9 @@ function peer() {
     }),
   };
   return {
+    setCompact(handler: typeof onCompact) {
+      onCompact = handler;
+    },
     setStats(handler: typeof onStats) {
       onStats = handler;
     },
@@ -599,16 +603,47 @@ describe("native Pi connection", () => {
       },
     });
     p.emit({ type: "agent_end", willRetry: true });
+    p.emit({
+      type: "auto_retry_start",
+      attempt: 1,
+      maxAttempts: 3,
+      delayMs: 100,
+      errorMessage: "retryable",
+    });
     p.emit({ type: "message_start", message: { role: "assistant" } });
     p.emit(text("recovered"));
     p.emit({
       type: "message_end",
       message: { role: "assistant", stopReason: "stop", usage },
     });
+    p.emit({ type: "auto_retry_end", success: true, attempt: 1 });
+    p.emit({ type: "compaction_start", reason: "threshold" });
+    p.emit({
+      type: "summarization_retry_scheduled",
+      attempt: 1,
+      maxAttempts: 3,
+      delayMs: 100,
+      errorMessage: "summary request failed",
+    });
+    p.emit({
+      type: "summarization_retry_attempt_start",
+      source: "compaction",
+      reason: "threshold",
+    });
+    p.emit({ type: "summarization_retry_finished" });
+    p.emit({
+      type: "compaction_end",
+      reason: "threshold",
+      result: { tokensBefore: 3000, estimatedTokensAfter: 300 },
+      aborted: false,
+      willRetry: false,
+    });
     p.emit({ type: "agent_settled" });
     await expect(done).resolves.toEqual({ stopReason: "end_turn" });
     const history = p.updates.filter(
-      (n) => n.update.sessionUpdate !== "usage_update",
+      (n) =>
+        n.update.sessionUpdate !== "usage_update" &&
+        !n.update._meta?.lody?.activity,
     );
     expect(history.map((n) => n.update.sessionUpdate)).toEqual([
       "tool_call",
@@ -630,15 +665,31 @@ describe("native Pi connection", () => {
       status: "completed",
       rawOutput: { content: [{ type: "text", text: "edited" }] },
     });
-    expect(p.usages.map((value) => value.usage)).toEqual([
-      {
-        inputTokens: 20,
-        outputTokens: 10,
-        cacheReadInputTokens: 4,
-        cacheCreationInputTokens: 2,
-        costUSD: 0.02,
-      },
+    expect(p.usages.at(-1)?.usage).toEqual({
+      inputTokens: 20,
+      outputTokens: 10,
+      cacheReadInputTokens: 4,
+      cacheCreationInputTokens: 2,
+      costUSD: 0.02,
+    });
+    const activities = p.updates.filter((n) => n.update._meta?.lody?.activity);
+    expect(
+      activities.map((n) => [
+        n.update.sessionUpdate,
+        "status" in n.update && n.update.status,
+      ]),
+    ).toEqual([
+      ["tool_call", "in_progress"],
+      ["tool_call_update", "completed"],
+      ["tool_call", "in_progress"],
+      ["tool_call", "in_progress"],
+      ["tool_call_update", "completed"],
+      ["tool_call_update", "completed"],
     ]);
+    expect(activities[2]?.update._meta?.lody?.activity).toMatchObject({
+      kind: "context_compaction",
+      automatic: true,
+    });
     p.close();
   });
 
@@ -683,6 +734,13 @@ describe("native Pi connection", () => {
       p.reply(request);
       p.emit(text("partial"));
       p.emit({
+        type: "auto_retry_start",
+        attempt: 1,
+        maxAttempts: 1,
+        delayMs: 100,
+        errorMessage: "Model unavailable",
+      });
+      p.emit({
         type: "message_end",
         message: {
           role: "assistant",
@@ -690,9 +748,22 @@ describe("native Pi connection", () => {
           errorMessage: "Model unavailable",
         },
       });
+      p.emit({
+        type: "auto_retry_end",
+        success: false,
+        attempt: 1,
+        finalError: "Model unavailable",
+      });
       p.emit({ type: "agent_settled" });
     });
     await expect(p.client.prompt(prompt)).rejects.toThrow("Model unavailable");
+    expect(
+      p.updates.find((n) => n.update.sessionUpdate === "tool_call_update")
+        ?.update,
+    ).toMatchObject({
+      status: "failed",
+      _meta: { lody: { activity: { failureReason: "Model unavailable" } } },
+    });
     p.setPrompt((request) => p.reply(request));
     await expect(p.client.prompt(prompt)).resolves.toEqual({
       stopReason: "end_turn",
@@ -740,6 +811,7 @@ describe("native Pi connection", () => {
     await Promise.all([cancelled, repeated, nextResult]);
     await expect(done).resolves.toEqual({ stopReason: "cancelled" });
     expect(p.commands.filter((c) => c.type === "abort")).toHaveLength(1);
+    p.setStats((request) => p.reply(request));
     await p.client.newSession({ cwd: "/work", mcpServers: [] });
     p.close();
   });
@@ -814,6 +886,200 @@ describe("native Pi connection", () => {
         mcpServers: [],
       }),
     ).rejects.toThrow("native session file");
+    p.close();
+  });
+
+  it("compacts with custom instructions and reports activity plus the final usage snapshot", async () => {
+    const p = peer();
+    await start(p);
+    p.setCompact((request) => {
+      p.emit({ type: "compaction_start", reason: "manual" });
+      p.emit({
+        type: "compaction_end",
+        reason: "manual",
+        aborted: false,
+        willRetry: false,
+        result: { tokensBefore: 2000, estimatedTokensAfter: 200 },
+      });
+      p.reply(request, { summary: "synthetic" });
+    });
+    p.setStats((request) =>
+      p.reply(request, {
+        tokens: { input: 50, output: 20, cacheRead: 4, cacheWrite: 2 },
+        cost: 0.03,
+        contextUsage: { tokens: null, contextWindow: 4096 },
+      }),
+    );
+    await expect(
+      p.client.prompt({
+        ...prompt,
+        prompt: [{ type: "text", text: "/compact keep the test results" }],
+      }),
+    ).resolves.toEqual({ stopReason: "end_turn" });
+    expect(p.commands.find((c) => c.type === "compact")).toMatchObject({
+      customInstructions: "keep the test results",
+    });
+    const activity = p.updates.filter((n) => n.update._meta?.lody?.activity);
+    expect(activity.map((n) => n.update)).toMatchObject([
+      {
+        sessionUpdate: "tool_call",
+        status: "in_progress",
+        _meta: {
+          lody: { activity: { kind: "context_compaction", automatic: false } },
+        },
+      },
+      {
+        sessionUpdate: "tool_call_update",
+        status: "completed",
+        _meta: {
+          lody: { activity: { usedTokensBefore: 2000, usedTokensAfter: 200 } },
+        },
+      },
+    ]);
+    expect(p.usages.at(-1)?.usage.costUSD).toBe(0.03);
+    expect(
+      p.updates.filter((n) => n.update.sessionUpdate === "usage_update"),
+    ).toEqual([]);
+    p.close();
+  });
+
+  it("reports failed and cancelled compaction without success text and can continue", async () => {
+    const p = peer();
+    await start(p);
+    const compact = {
+      ...prompt,
+      prompt: [{ type: "text" as const, text: "/compact" }],
+    };
+    p.setCompact((request) => {
+      p.emit({ type: "compaction_start", reason: "manual" });
+      p.emit({
+        type: "compaction_end",
+        reason: "manual",
+        aborted: false,
+        errorMessage: "Summary unavailable",
+        willRetry: false,
+      });
+      p.reply(request, undefined, "Summary unavailable");
+    });
+    await expect(p.client.prompt(compact)).rejects.toThrow(
+      "Summary unavailable",
+    );
+    const entered = deferred<Record<string, unknown>>();
+    p.setCompact(entered.resolve);
+    const done = p.client.prompt(compact);
+    const command = await entered.promise;
+    let compactionStarted = false;
+    p.setAbort((request) => {
+      if (!compactionStarted) {
+        // Pi compact() awaits abort before it creates the compaction controller.
+        // An early Stop can acknowledge idle before that controller exists.
+        p.reply(request);
+        compactionStarted = true;
+        p.emit({ type: "compaction_start", reason: "manual" });
+        return;
+      }
+      p.emit({
+        type: "compaction_end",
+        reason: "manual",
+        aborted: true,
+        willRetry: false,
+      });
+      p.reply(command, undefined, "Compaction cancelled");
+      p.reply(request);
+    });
+    await p.client.cancel({ sessionId: prompt.sessionId });
+    await expect(done).resolves.toEqual({ stopReason: "cancelled" });
+    expect(
+      p.updates.filter((n) => n.update.sessionUpdate === "agent_message_chunk"),
+    ).toEqual([]);
+    expect(
+      p.updates
+        .filter((n) => n.update.sessionUpdate === "tool_call_update")
+        .map((n) => n.update),
+    ).toMatchObject([
+      {
+        status: "failed",
+        _meta: { lody: { activity: { failureReason: "Summary unavailable" } } },
+      },
+      {
+        status: "failed",
+        _meta: { lody: { activity: { failureReason: "Cancelled" } } },
+      },
+    ]);
+    p.setPrompt((request) => {
+      p.emit({ type: "agent_start" });
+      p.reply(request);
+      p.emit({ type: "compaction_start", reason: "overflow" });
+      p.emit({
+        type: "compaction_end",
+        reason: "overflow",
+        aborted: false,
+        willRetry: true,
+        errorMessage: "Automatic summary unavailable",
+      });
+      p.emit(text("Pi continued after the failed automatic summary"));
+      p.emit({ type: "agent_settled" });
+    });
+    await expect(p.client.prompt(prompt)).resolves.toEqual({
+      stopReason: "end_turn",
+    });
+    expect(
+      p.updates
+        .filter((n) => n.update.sessionUpdate === "tool_call_update")
+        .at(-1)?.update,
+    ).toMatchObject({
+      status: "failed",
+      _meta: {
+        lody: {
+          activity: {
+            automatic: true,
+            failureReason: "Automatic summary unavailable",
+          },
+        },
+      },
+    });
+    p.close();
+  });
+
+  it("advertises usage and refreshes authoritative snapshots across resume and model changes", async () => {
+    const p = peer();
+    let input = 20;
+    p.setStats((request) =>
+      p.reply(request, {
+        tokens: { input, output: 10, cacheRead: 4, cacheWrite: 2 },
+        cost: 0.02,
+        contextUsage: {
+          tokens: 64,
+          contextWindow: p.state.model.contextWindow,
+        },
+      }),
+    );
+    await start(p);
+    expect(initializeResponse().agentCapabilities?._meta?.lody?.usage).toEqual({
+      version: 1,
+    });
+    await p.client.resumeSession({
+      sessionId: prompt.sessionId,
+      cwd: "/work",
+      mcpServers: [],
+    });
+    input = 30;
+    await p.client.setSessionConfigOption({
+      sessionId: prompt.sessionId,
+      configId: "model",
+      value: "fixture/two",
+    });
+    expect(p.usages.map((value) => value.usage.inputTokens)).toEqual([
+      20, 20, 30,
+    ]);
+    // An explicit empty breakdown prevents a host from assigning the cumulative
+    // multi-model and compaction total to whichever model is selected now.
+    expect(p.usages.map((value) => value.modelUsage)).toEqual([{}, {}, {}]);
+    expect(p.updates.at(-1)?.update).toEqual({
+      sessionUpdate: "usage_update",
+      used: 64,
+      size: 4096,
+    });
     p.close();
   });
 

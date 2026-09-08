@@ -2,17 +2,24 @@ import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import { once } from "node:events";
 import { watch } from "node:fs";
-import { mkdtemp, readFile, stat } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Readable, Writable } from "node:stream";
 import { ClientSideConnection, ndJsonStream } from "@agentclientprotocol/sdk";
 const root = await mkdtemp(join(tmpdir(), "acp-pi-smoke-"));
+await mkdir(join(root, "profile"));
+await writeFile(
+  join(root, "profile", "settings.json"),
+  JSON.stringify({ compaction: { keepRecentTokens: 128 } }),
+);
 const children = new Set();
 let toolStarted;
 let answerQuestion = async () => ({ action: "cancel" });
 const output = [];
+const updates = [];
+const usages = [];
 let processPid;
 let piPid;
 function readWhenWritten(path) {
@@ -64,6 +71,7 @@ async function start(id, mcpServers = []) {
   const client = new ClientSideConnection(
     () => ({
       sessionUpdate: async ({ update }) => {
+        updates.push(update);
         if (
           update.sessionUpdate === "tool_call" &&
           update.title === "fixture_gate"
@@ -74,7 +82,9 @@ async function start(id, mcpServers = []) {
       },
       requestPermission: async () => ({ outcome: { outcome: "cancelled" } }),
       unstable_createElicitation: (request) => answerQuestion(request),
-      extNotification: async () => {},
+      extNotification: async (method, value) => {
+        if (method.endsWith("lody/session/usage_update")) usages.push(value);
+      },
     }),
     ndJsonStream(Writable.toWeb(child.stdin), Readable.toWeb(child.stdout)),
   );
@@ -83,6 +93,7 @@ async function start(id, mcpServers = []) {
     clientCapabilities: {},
   });
   assert.equal(info.agentCapabilities._meta.lody.steering.version, 1);
+  assert.equal(info.agentCapabilities._meta.lody.usage.version, 1);
   await assert.rejects(
     client.newSession({
       cwd: root,
@@ -200,6 +211,27 @@ try {
   await prompt("continue after cancelling question");
 
   await prompt("/stats");
+  await prompt("/compact retain the fixture verification outcomes");
+  const compaction = updates.filter(
+    (u) => u._meta?.lody?.activity?.kind === "context_compaction",
+  );
+  assert.deepEqual(
+    compaction.map((u) => u.status),
+    ["in_progress", "completed"],
+  );
+  assert.equal(compaction[0].toolCallId, compaction[1].toolCallId);
+  const entries = (await readFile(a.id, "utf8"))
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line));
+  assert(entries.some((e) => e.type === "compaction"));
+  const inputTotal = entries.reduce(
+    (sum, entry) =>
+      sum + (entry.message?.usage?.input ?? entry.usage?.input ?? 0),
+    0,
+  );
+  assert.equal(usages.at(-1).usage.inputTokens, inputTotal);
+  assert.deepEqual(usages.at(-1).modelUsage, {});
   const ready = new Promise((resolve) => {
     toolStarted = resolve;
   });
