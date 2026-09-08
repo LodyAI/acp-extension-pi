@@ -116,24 +116,43 @@ restart/native resume, and failed session replacement with explicit recovery.
 It requires no provider credentials or network calls after dependency installation.
 Temporary synthetic artifacts are retained at the printed path.
 
-A separate local live check through Lody's existing ACP client passed CommandCode /
-DeepSeek V4 Flash file writes, acknowledged steering and the host ownership lease,
-compaction, stats and process restart/native resume. It used an isolated Pi profile
-with a smaller recent-context retention threshold for compaction. Credentials and
-normal Pi settings were unchanged; real transcripts are not committed.
+A live check of adapter implementation `3828569` through Lody's existing ACP client
+passed CommandCode / DeepSeek V4 Flash file writes, acknowledged steering and the
+host ownership lease, compaction, stats and process restart/native resume. It used
+an isolated Pi profile with a smaller recent-context retention threshold for
+compaction. A separate real-model ACP check passed MCP failed-result presentation,
+continuation after failure, cancellation delivered to the MCP server, and a new
+file-writing turn after cancellation. Credentials and normal Pi settings were
+unchanged; real transcripts are not committed.
 
 Windows process-tree shutdown/packaging and other providers remain unverified. The
-original spike's full Electron validation is historical evidence. Full Electron
-acceptance of the stdio MCP path is tracked separately from the protocol smoke.
+original spike's full Electron validation is historical evidence.
 No Core opt-out extension or Host MCP changes are required. Builtin registration
 and managed artifact/release integration remain open. No npm or managed runtime
 release is claimed by this initial source push.
 
-A local Electron check passed a selected workspace stdio tool through the complete
-Desktop/CLI/ACP/Pi path. The built-in `lody_session_list` call reached Lody's MCP
-server, but that test build returned `LODY_AUTH_URL is not defined`. Pi received the
-failed result correctly; successful built-in business operations are not yet
-accepted. This is separate from stdio protocol compatibility.
+A source-built local Electron check passed a selected workspace stdio tool through
+the complete Desktop/CLI/ACP/Pi path. Its builtin authentication-address error came
+from using the no-cloud source composition and is not a Pi integration prerequisite.
+
+On 2026-09-08, the signed-in Lody 0.92.1 desktop passed a separate live check using
+the current adapter as a custom command and CommandCode / DeepSeek V4 Flash:
+
+- Native file writes and builtin `lody_session_list` returning the actual current
+  session after resolving the real project id through `lody_session_create_options`.
+- Steering during a gated bash tool changed the actual file outcome: the new file
+  existed and the superseded file was never written.
+- Stopping a gated tool terminated its process; the following turn wrote a file,
+  surfaced a missing-file error and settled normally.
+- After terminating the idle adapter and refreshing the desktop, Lody resumed the
+  same native session file; the model recalled the prior result without tools.
+
+The restart check also exposed a Host warning: configuration application against
+the closed connection was described as a rejected thinking setting. The subsequent
+restore successfully reapplied that setting and completed the turn. This warning
+is recorded separately from adapter recovery. No Lody/Core patches were loaded for
+this desktop check. This is scoped acceptance, not a claim that every builtin tool,
+provider, desktop workflow or platform has been tested.
 
 ## Upstream contract and provenance
 
