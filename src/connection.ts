@@ -327,10 +327,25 @@ export class PiRpcConnection implements AgentConnection {
           state.pendingMessageCount === 0
         ) {
           if (run.error && !run.cancelled) run.reject(new Error(run.error));
-          else
+          else {
+            if (!run.cancelled)
+              await this.update({
+                sessionUpdate: "session_info_update",
+                _meta: {
+                  lody: {
+                    notice: {
+                      level: "info",
+                      message:
+                        "Pi processed this input without starting a model turn.",
+                      source: "pi",
+                    },
+                  },
+                },
+              });
             run.resolve({
               stopReason: run.cancelled ? "cancelled" : "end_turn",
             });
+          }
         }
       }
       return await run.promise;

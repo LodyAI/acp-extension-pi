@@ -67,6 +67,8 @@ non-empty MCP list are rejected before Pi starts.
 
 Pi's prompt ACK may describe an input command with no agent run. Started runs wait
 for `agent_settled`, including retry/automatic compaction, rather than `agent_end`.
+When a handled input or extension command finishes successfully without starting a
+model run, the adapter emits a neutral Pi notice before returning `end_turn`.
 Cancellation waits for `clear_queue`, `abort` and queued events before classifying
 pending steer delivery. Natural settlement clears unapplied queued steer before
 allowing another prompt. Unanswered extension questions are cancelled before abort.

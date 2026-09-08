@@ -629,15 +629,36 @@ describe("native Pi connection", () => {
     p.close();
   });
 
-  it("handles accepted input without an agent run, and rejects prompt preflight errors", async () => {
+  it("reports handled input without misclassifying errors or empty model runs", async () => {
     const p = peer();
     await start(p);
+    const notices = () =>
+      p.updates.flatMap((notification) => {
+        const notice = notification.update._meta?.lody?.notice;
+        return notice ? [notice] : [];
+      });
     p.setPrompt((request) => p.reply(request));
     await expect(p.client.prompt(prompt)).resolves.toEqual({
       stopReason: "end_turn",
     });
+    expect(notices()).toEqual([
+      {
+        level: "info",
+        message: "Pi processed this input without starting a model turn.",
+        source: "pi",
+      },
+    ]);
     p.setPrompt((request) => p.reply(request, undefined, "No API key found"));
     await expect(p.client.prompt(prompt)).rejects.toThrow("No API key found");
+    p.setPrompt((request) => {
+      p.emit({ type: "agent_start" });
+      p.reply(request);
+      p.emit({ type: "agent_settled" });
+    });
+    await expect(p.client.prompt(prompt)).resolves.toEqual({
+      stopReason: "end_turn",
+    });
+    expect(notices()).toHaveLength(1);
     p.close();
   });
 
