@@ -89,6 +89,8 @@ model run, the adapter emits a neutral Pi notice before returning `end_turn`.
 Cancellation waits for `clear_queue`, `abort` and queued events before classifying
 pending steer delivery. Natural settlement clears unapplied queued steer before
 allowing another prompt. Unanswered extension questions are cancelled before abort.
+Cancel returns after run cleanup; input or session replacement arriving during
+cancellation/settlement waits for that cleanup, including the final usage snapshot.
 EOF fails pending work. Closing the ACP connection lets Pi stop its tracked native
 tool processes before the adapter waits for Pi to exit.
 

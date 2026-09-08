@@ -9,6 +9,8 @@ Lody workspace packages or fork its session executor here.
   verify the upstream RPC lifecycle before changing the pin.
 - Prompt ACK means accepted or handled, not completed. Started runs finish only at
   `agent_settled`; input commands may finish without a run. Abort clears queues first.
+  Cancel and admission after cancellation/settlement wait for the same run cleanup,
+  including usage reporting and any abort still in flight.
 - Steering is applied only on the matching custom-message metadata, never by text.
   Send the Core applied notification before later session updates. The ACP client
   owns its output/application barrier. Preserve provable idle refusal for requeue.

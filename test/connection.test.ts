@@ -62,6 +62,11 @@ function peer() {
     reply(request);
   };
   let onClearQueue = (request: Record<string, unknown>) => reply(request, {});
+  let onStats = (request: Record<string, unknown>) =>
+    reply(request, {
+      tokens: { input: 20, output: 10, cacheRead: 4, cacheWrite: 2 },
+      cost: 0.02,
+    });
   function reply(
     request: Record<string, unknown>,
     data?: unknown,
@@ -107,10 +112,7 @@ function peer() {
             accepted.resolve();
           break;
         case "get_session_stats":
-          reply(request, {
-            tokens: { input: 20, output: 10, cacheRead: 4, cacheWrite: 2 },
-            cost: 0.02,
-          });
+          onStats(request);
           break;
         case "get_available_models":
           reply(request, { models: [model, { ...model, id: "two" }] });
@@ -172,6 +174,9 @@ function peer() {
     }),
   };
   return {
+    setStats(handler: typeof onStats) {
+      onStats = handler;
+    },
     setSession(handler: typeof onSession) {
       onSession = handler;
     },
@@ -711,15 +716,48 @@ describe("native Pi connection", () => {
     p.close();
   });
 
+  it("holds cancel and the next input behind the same settlement barrier", async () => {
+    const p = peer();
+    await start(p);
+    const stats = deferred<Record<string, unknown>>();
+    p.setStats(stats.resolve);
+    const done = p.client.prompt(prompt);
+    await p.accepted.promise;
+    const cancelled = p.client.cancel({ sessionId: prompt.sessionId });
+    const repeated = p.client.cancel({ sessionId: prompt.sessionId });
+    const request = await stats.promise;
+    p.setPrompt((request) => p.reply(request));
+    const next = p.client.prompt(prompt);
+    // If admission rejects while stats are pending, this assertion fails even though
+    // the old run has already reached Pi's settled event.
+    const nextResult = expect(next).resolves.toEqual({
+      stopReason: "end_turn",
+    });
+    p.reply(request, {
+      tokens: { input: 20, output: 10, cacheRead: 4, cacheWrite: 2 },
+      cost: 0.02,
+    });
+    await Promise.all([cancelled, repeated, nextResult]);
+    await expect(done).resolves.toEqual({ stopReason: "cancelled" });
+    expect(p.commands.filter((c) => c.type === "abort")).toHaveLength(1);
+    await p.client.newSession({ cwd: "/work", mcpServers: [] });
+    p.close();
+  });
+
   it("cancels a run that starts only after the initial abort acknowledged idle preflight", async () => {
     const p = peer();
     await start(p);
     const accepted = deferred<Record<string, unknown>>();
     p.setPrompt((request) => accepted.resolve(request));
-    p.setAbort((request) => p.reply(request));
+    const idleAbort = deferred();
+    p.setAbort((request) => {
+      p.reply(request);
+      idleAbort.resolve();
+    });
     const done = p.client.prompt(prompt);
     const request = await accepted.promise;
-    await p.client.cancel({ sessionId: prompt.sessionId });
+    const cancelled = p.client.cancel({ sessionId: prompt.sessionId });
+    await idleAbort.promise;
     p.setAbort((abort) => {
       p.emit({ type: "agent_settled" });
       p.reply(abort);
@@ -727,6 +765,7 @@ describe("native Pi connection", () => {
     p.emit({ type: "agent_start" });
     p.reply(request);
     await expect(done).resolves.toEqual({ stopReason: "cancelled" });
+    await cancelled;
     p.close();
   });
 
@@ -799,7 +838,8 @@ describe("native Pi connection", () => {
     });
     const done = p.client.prompt(prompt);
     await seen.promise;
-    await p.client.cancel({ sessionId: prompt.sessionId });
+    const cancelled = p.client.cancel({ sessionId: prompt.sessionId });
+    await p.questionAnswered.promise;
     const cancelledBeforeAnswer = p.replies.some(
       (r) => r.id === "held" && r.cancelled === true,
     );
@@ -807,6 +847,7 @@ describe("native Pi connection", () => {
     await p.questionAnswered.promise;
     p.reply(command);
     await expect(done).resolves.toEqual({ stopReason: "cancelled" });
+    await cancelled;
     expect(cancelledBeforeAnswer).toBe(true);
     expect(p.replies.filter((r) => r.id === "held")).toEqual([
       { type: "extension_ui_response", id: "held", cancelled: true },

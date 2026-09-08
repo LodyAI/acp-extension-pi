@@ -90,6 +90,8 @@ function deferred<T>() {
   return { promise, resolve, reject };
 }
 type Run = ReturnType<typeof deferred<acp.PromptResponse>> & {
+  finished: ReturnType<typeof deferred<void>>;
+  cancellation?: Promise<void>;
   started: boolean;
   settled: boolean;
   cancelled: boolean;
@@ -287,11 +289,13 @@ export class PiRpcConnection implements AgentConnection {
   };
 
   prompt: AgentConnection["prompt"] = async (request) => {
+    await this.waitForSettledRun();
     this.assertSession(request.sessionId);
     this.assertIdle();
     const { message, images } = this.promptContent(request.prompt);
     const run: Run = {
       ...deferred<acp.PromptResponse>(),
+      finished: deferred<void>(),
       started: false,
       settled: false,
       cancelled: false,
@@ -357,14 +361,31 @@ export class PiRpcConnection implements AgentConnection {
       }
       return await run.promise;
     } finally {
+      await run.cancellation?.catch(() => undefined);
       await this.cancelQuestions().catch(() => undefined);
       if (this.active === run) this.active = undefined;
+      run.finished.resolve();
     }
   };
 
   cancel: AgentConnection["cancel"] = async (request) => {
     this.assertSession(request.sessionId);
-    if (this.active) this.active.cancelled = true;
+    const run = this.active;
+    if (!run) return;
+    run.cancelled = true;
+    await this.cancelRun(run);
+    await run.finished.promise;
+  };
+
+  private cancelRun(run: Run, afterPreflight = false): Promise<void> {
+    if (!run.cancellation || afterPreflight)
+      run.cancellation = (run.cancellation ?? Promise.resolve()).then(() =>
+        this.abort(),
+      );
+    return run.cancellation;
+  }
+
+  private async abort(): Promise<void> {
     const pending = this.pendingSteer;
     try {
       await this.cancelQuestions();
@@ -386,7 +407,7 @@ export class PiRpcConnection implements AgentConnection {
       );
       throw error;
     }
-  };
+  }
 
   private promptContent(blocks: acp.ContentBlock[]) {
     const text: string[] = [];
@@ -467,13 +488,12 @@ export class PiRpcConnection implements AgentConnection {
         run.started = true;
         // Cancellation may have arrived while Pi was still in asynchronous prompt preflight.
         if (run.cancelled)
-          void this.cancel({ sessionId: this.sessionId }).catch(
-            (error: unknown) =>
-              run.reject(
-                error instanceof Error
-                  ? error
-                  : new Error("Pi cancellation failed"),
-              ),
+          void this.cancelRun(run, true).catch((error: unknown) =>
+            run.reject(
+              error instanceof Error
+                ? error
+                : new Error("Pi cancellation failed"),
+            ),
           );
         break;
       case "agent_settled": {
@@ -793,6 +813,7 @@ export class PiRpcConnection implements AgentConnection {
     action: () => Promise<T>,
     replaceSession = false,
   ): Promise<T> {
+    await this.waitForSettledRun();
     this.assertIdle();
     this.configuring = true;
     // A replacement can change Pi's durable identity before its ACK or config succeeds.
@@ -813,6 +834,10 @@ export class PiRpcConnection implements AgentConnection {
       throw new Error(
         "Pi already has an active prompt or configuration operation",
       );
+  }
+  private async waitForSettledRun(): Promise<void> {
+    const run = this.active;
+    if (run?.settled || run?.cancelled) await run.finished.promise;
   }
   private assertSession(id: string): void {
     if (!this.sessionId || id !== this.sessionId)
