@@ -1,3 +1,5 @@
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { registerMcpTools } from "./mcp.js";
 /** Loaded inside Pi. Identity travels as native custom-message metadata, never model text. */
 type Content = Array<
   | { type: "text"; text: string }
@@ -7,29 +9,8 @@ type Context = {
   isIdle(): boolean;
   ui: { notify(message: string, type: "info"): void };
 };
-type Pi = {
-  on(
-    event: "session_start",
-    handler: (event: unknown, ctx: Context) => void,
-  ): void;
-  registerCommand(
-    name: string,
-    command: {
-      description: string;
-      handler(args: string, ctx: Context): Promise<void>;
-    },
-  ): void;
-  sendMessage(
-    message: {
-      customType: string;
-      content: Content;
-      display: boolean;
-      details: { steerId: string };
-    },
-    options: { deliverAs: "steer" },
-  ): void;
-};
-export default function lodySteering(pi: Pi): void {
+export default async function lodyExtension(pi: ExtensionAPI): Promise<void> {
+  await registerMcpTools(pi);
   const emit = (ctx: Context, event: unknown) =>
     ctx.ui.notify("lody-rpc:" + JSON.stringify(event), "info");
   pi.on("session_start", (_event, ctx) => {

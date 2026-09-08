@@ -1,9 +1,12 @@
-import { writeFileSync } from "node:fs";
+import { writeFileSync, appendFileSync } from "node:fs";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { Type } from "@sinclair/typebox";
 import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
 export default function (pi) {
+  pi.on("session_start", () => {
+    appendFileSync("mcp-runtime-paths", `${process.env.LODY_PI_MCP_CONFIG}\n`);
+  });
   let release;
   let blockShutdown = false;
   pi.registerTool({
@@ -51,6 +54,9 @@ export default function (pi) {
       const stream = createAssistantMessageEventStream();
       const last = context.messages.at(-1);
       const input = JSON.stringify(last?.content);
+      const mcpTool =
+        last?.role === "user" &&
+        input.match(/mcp fixture (echo|wait|error|image)/)?.[1];
       if (input.includes("process fixture")) {
         blockShutdown = true;
         writeFileSync("pi.pid", `${process.pid}\n`);
@@ -76,7 +82,8 @@ export default function (pi) {
         stream.push({ type: "start", partial: message });
         if (
           last?.role === "user" &&
-          (input.includes("write fixture") ||
+          (mcpTool ||
+            input.includes("write fixture") ||
             input.includes("gate fixture") ||
             input.includes("process fixture"))
         ) {
@@ -85,15 +92,25 @@ export default function (pi) {
           const tool = {
             type: "toolCall",
             id: "write-fixture",
-            name: gate ? "fixture_gate" : processTool ? "bash" : "write",
-            arguments: gate
-              ? {}
-              : processTool
-                ? {
-                    command:
-                      "echo $$ > process.pid; exec /bin/cat process.fifo",
-                  }
-                : { path: "fixture.txt", content: "native pi wrote this\n" },
+            name: mcpTool
+              ? `mcp_fixture_${mcpTool}`
+              : gate
+                ? "fixture_gate"
+                : processTool
+                  ? "bash"
+                  : "write",
+            arguments: mcpTool
+              ? mcpTool === "echo"
+                ? { value: "native-value" }
+                : {}
+              : gate
+                ? {}
+                : processTool
+                  ? {
+                      command:
+                        "echo $$ > process.pid; exec /bin/cat process.fifo",
+                    }
+                  : { path: "fixture.txt", content: "native pi wrote this\n" },
           };
           message.content = [tool];
           message.stopReason = "toolUse";
@@ -109,11 +126,13 @@ export default function (pi) {
             partial: message,
           });
         } else {
-          const text = JSON.stringify(context.messages).includes(
-            "steered fixture",
-          )
-            ? "Pi steer applied"
-            : "Pi native smoke passed";
+          const text =
+            last?.role === "toolResult" && last.toolName.startsWith("mcp_")
+              ? "MCP_RESULT " +
+                JSON.stringify({ isError: last.isError, content: last.content })
+              : JSON.stringify(context.messages).includes("steered fixture")
+                ? "Pi steer applied"
+                : "Pi native smoke passed";
           message.content = [{ type: "text", text }];
           stream.push({
             type: "text_start",

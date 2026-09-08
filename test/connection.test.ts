@@ -93,6 +93,13 @@ function peer() {
         case "new_session":
         case "switch_session":
           onSession(request);
+          emit({
+            type: "extension_ui_request",
+            method: "notify",
+            message:
+              "lody-rpc:" +
+              JSON.stringify({ type: "lody_steer_ready", version: 1 }),
+          });
           break;
         case "get_state":
           reply(request, state);
@@ -153,6 +160,7 @@ function peer() {
   const usages: SessionUsageUpdate[] = [];
   let client: PiRpcConnection | undefined;
   const host = {
+    configureMcp: async (_servers: acp.McpServer[]) => {},
     update: async (notification: acp.SessionNotification) => {
       updates.push(notification);
     },

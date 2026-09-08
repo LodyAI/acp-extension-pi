@@ -96,6 +96,7 @@ type Run = ReturnType<typeof deferred<acp.PromptResponse>> & {
   error?: string;
 };
 type Host = {
+  configureMcp: (servers: acp.McpServer[]) => Promise<void>;
   update: (notification: acp.SessionNotification) => Promise<void>;
   extension: (method: string, params: Record<string, unknown>) => Promise<void>;
   usage: (usage: SessionUsageUpdate) => void;
@@ -146,11 +147,14 @@ export class PiRpcConnection implements AgentConnection {
   newSession: AgentConnection["newSession"] = async (request) => {
     return this.configure(async () => {
       this.cwd = request.cwd;
+      await this.host.configureMcp(request.mcpServers ?? []);
+      this.steeringReady = false;
       const result = z
         .object({ cancelled: z.boolean() })
         .parse(await this.rpc.request("new_session"));
       if (result.cancelled)
         throw new Error("Pi extension cancelled session creation");
+      await this.initialize({ protocolVersion: 1 });
       return this.prepare(request._meta);
     }, true);
   };
@@ -166,6 +170,8 @@ export class PiRpcConnection implements AgentConnection {
           "Pi resume requires its native session file; pi-acp ids cannot be migrated automatically",
         );
       }
+      await this.host.configureMcp(request.mcpServers ?? []);
+      this.steeringReady = false;
       const result = z.object({ cancelled: z.boolean() }).parse(
         await this.rpc.request("switch_session", {
           sessionPath: request.sessionId,
@@ -173,6 +179,7 @@ export class PiRpcConnection implements AgentConnection {
       );
       if (result.cancelled)
         throw new Error("Pi extension cancelled session resume");
+      await this.initialize({ protocolVersion: 1 });
       const response = await this.prepare(request._meta);
       if (response.sessionId !== request.sessionId)
         throw new Error("Pi resumed a different session file");
@@ -888,7 +895,6 @@ export function initializeResponse(): acp.InitializeResponse {
     agentCapabilities: {
       _meta: {
         lody: {
-          mcp: { version: 1, supported: false },
           steering: {
             version: 1,
             transport: "request",

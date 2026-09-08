@@ -60,10 +60,27 @@ ownership on the applied notification before consuming later output. Lody alread
 provides that barrier. The adapter sends notifications in native event order; ACP
 notification delivery itself is not a remote acknowledgement of UI/history work.
 
-MCP is outside the first adapter version. The adapter advertises
-`_meta.lody.mcp = { version: 1, supported: false }`; compatible hosts must omit both
-builtin and workspace MCP servers when starting Pi. Older hosts that still send a
-non-empty MCP list are rejected before Pi starts.
+Standard ACP **stdio MCP** servers are supported, including Lody's built-in server
+and selected stdio workspace servers. The bundled Pi extension connects with the
+MCP SDK and registers native tools; Pi owns their execution and cancellation. Tool
+names are `mcp_<server>_<tool>`, with non-identifier characters replaced by `_`;
+collisions and names exceeding 64 characters fail session setup. Discovery includes
+all pages and takes a snapshot at session startup. HTTP/SSE, dynamic tool-list
+updates, resource/prompt discovery, OAuth and MCP sampling/elicitation are not
+implemented. Unsupported transports are rejected, not silently ignored.
+
+Text/image results retain their content and MCP errors remain failed tool results.
+Structured results are also provided as JSON text; other returned content blocks
+are represented as JSON text rather than discarded. Cancellation requests do not
+promise rollback of a server's side effects.
+
+Each new/resumed session uses that ACP request's server configuration. The adapter
+atomically stages it in a private temporary file under its existing configuration
+exclusion; Pi reloads it with the extension. Setup fails unless the extension is
+ready, including after partial server failure. This file is only a runtime handoff,
+not session identity or durable settings, and normal shutdown removes it. Abrupt
+process termination can leave a private temporary directory containing server env
+values; these are never added to the native transcript or command line.
 
 Pi's prompt ACK may describe an input command with no agent run. Started runs wait
 for `agent_settled`, including retry/automatic compaction, rather than `agent_end`.
@@ -92,7 +109,9 @@ Unit tests cover framing/correlation, lifecycle settlement, retry, cancellation,
 EOF, repeated steering identities and output order, native resume, model configuration,
 usage and interactive input. The executable smoke uses a real pinned Pi runtime
 with a synthetic offline provider: actual file write, input commands, questions,
-stats, tool cancellation, adapter signal shutdown with a real bash process, process
+stats, stdio MCP text/image/structured/error results, cancellation, changed server
+configuration on resume/replacement, failed MCP setup, empty-selection removal,
+MCP process/configuration cleanup, adapter signal shutdown with a real bash process, process
 restart/native resume, and failed session replacement with explicit recovery.
 It requires no provider credentials or network calls after dependency installation.
 Temporary synthetic artifacts are retained at the printed path.
@@ -105,10 +124,16 @@ normal Pi settings were unchanged; real transcripts are not committed.
 
 Windows process-tree shutdown/packaging and other providers remain unverified. The
 original spike's full Electron validation is historical evidence. Full Electron
-acceptance requires a Lody version that honors Core's MCP opt-out before session
-startup; older hosts that inject builtin MCP remain incompatible. Builtin registration
+acceptance of the stdio MCP path is tracked separately from the protocol smoke.
+No Core opt-out extension or Host MCP changes are required. Builtin registration
 and managed artifact/release integration remain open. No npm or managed runtime
 release is claimed by this initial source push.
+
+A local Electron check passed a selected workspace stdio tool through the complete
+Desktop/CLI/ACP/Pi path. The built-in `lody_session_list` call reached Lody's MCP
+server, but that test build returned `LODY_AUTH_URL is not defined`. Pi received the
+failed result correctly; successful built-in business operations are not yet
+accepted. This is separate from stdio protocol compatibility.
 
 ## Upstream contract and provenance
 

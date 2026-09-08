@@ -17,8 +17,13 @@ Lody workspace packages or fork its session executor here.
   on replacement failure; never allow an old or empty id to address the new file.
 - stdout is exclusively ACP. Diagnostics belong on stderr. Close the owned Pi
   process tree when the ACP transport closes; never silently retry a prompt.
-- Advertise only implemented capabilities. MCP, permission modes, native history
-  import and TUI replacement are not implemented. Reject MCP before starting Pi.
+- MCP uses standard ACP stdio configuration; reject unsupported transports before
+  starting Pi. Pi's extension owns MCP clients/tools and native cancellation.
+  Write runtime configuration only under the existing session/config exclusion;
+  new/resumed sessions must observe fresh extension readiness before accepting input.
+  Keep configuration secrets in private temporary files, never native history.
+- Advertise only implemented capabilities. Permission modes, native history import
+  and TUI replacement are not implemented.
 - Use shared `acp-extension-core` contracts, not copied protocol definitions.
 - Tests use synthetic inputs and explicit signals; no sleeps or commercial models
   in CI. Never commit credentials, real transcripts or temporary validation data.

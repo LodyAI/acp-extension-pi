@@ -1,6 +1,9 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { Readable, Writable } from "node:stream";
 import { fileURLToPath } from "node:url";
+import { mkdtempSync, writeFileSync, renameSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   AgentSideConnection,
   RequestError,
@@ -12,6 +15,7 @@ import {
   normalizeLodyExtensionMethod,
 } from "acp-extension-core";
 import { PiRpcConnection, initializeResponse } from "./connection.js";
+import { MCP_CONFIG_ENV } from "./mcp.js";
 
 const SHUTDOWN_GRACE_MS = 1_000;
 
@@ -37,43 +41,49 @@ export function serve(stream: Stream, piArgs: string[] = []) {
   let runtime: Promise<PiRpcConnection> | undefined;
   let cwd: string | undefined;
   let closing: Promise<void> | undefined;
+  let configDirectory: string | undefined;
   const close = (): Promise<void> => {
     if (closing) return closing;
     closing = (async () => {
-      const owned = child;
-      if (!owned?.pid || owned.exitCode !== null || owned.signalCode !== null)
-        return;
-      if (process.platform === "win32") owned.stdin?.end();
-      else {
-        // Pi's SIGTERM handler stops tracked detached tools before awaiting shutdown hooks.
-        try {
-          process.kill(-owned.pid, "SIGTERM");
-        } catch {
-          /* Already exited. */
+      try {
+        const owned = child;
+        if (!owned?.pid || owned.exitCode !== null || owned.signalCode !== null)
+          return;
+        if (process.platform === "win32") owned.stdin?.end();
+        else {
+          // Pi's SIGTERM handler stops tracked detached tools before awaiting shutdown hooks.
+          try {
+            process.kill(-owned.pid, "SIGTERM");
+          } catch {
+            /* Already exited. */
+          }
         }
-      }
-      if (await waitForExit(owned)) return;
-      if (process.platform === "win32") {
-        await new Promise<void>((resolve) => {
-          const killer = spawn(
-            "taskkill",
-            ["/pid", String(owned.pid), "/T", "/F"],
-            { stdio: "ignore" },
-          );
-          killer.once("error", () => {
-            owned.kill();
-            resolve();
+        if (await waitForExit(owned)) return;
+        if (process.platform === "win32") {
+          await new Promise<void>((resolve) => {
+            const killer = spawn(
+              "taskkill",
+              ["/pid", String(owned.pid), "/T", "/F"],
+              { stdio: "ignore" },
+            );
+            killer.once("error", () => {
+              owned.kill();
+              resolve();
+            });
+            killer.once("exit", () => resolve());
           });
-          killer.once("exit", () => resolve());
-        });
-      } else {
-        try {
-          process.kill(-owned.pid, "SIGKILL");
-        } catch {
-          /* Already exited. */
+        } else {
+          try {
+            process.kill(-owned.pid, "SIGKILL");
+          } catch {
+            /* Already exited. */
+          }
         }
+        await waitForExit(owned);
+      } finally {
+        if (configDirectory)
+          rmSync(configDirectory, { recursive: true, force: true });
       }
-      await waitForExit(owned);
     })();
     return closing;
   };
@@ -94,6 +104,9 @@ export function serve(stream: Stream, piArgs: string[] = []) {
           "Create or resume a session first",
         );
       cwd = directory;
+      configDirectory = mkdtempSync(join(tmpdir(), "lody-pi-mcp-"));
+      const configPath = join(configDirectory, "servers.json");
+      writeFileSync(configPath, "[]", { mode: 0o600 });
       const entry = fileURLToPath(
         new URL(
           "./bundle/cli.js",
@@ -112,6 +125,7 @@ export function serve(stream: Stream, piArgs: string[] = []) {
         ],
         {
           cwd,
+          env: { ...process.env, [MCP_CONFIG_ENV]: configPath },
           stdio: ["pipe", "pipe", "pipe"],
           detached: process.platform !== "win32",
         },
@@ -125,6 +139,15 @@ export function serve(stream: Stream, piArgs: string[] = []) {
           readable: Readable.toWeb(child.stdout!),
         },
         {
+          configureMcp: async (servers) => {
+            // Called only inside PiRpcConnection's existing configuration exclusion.
+            if (closing) throw new Error("ACP connection closed");
+            const pendingPath = configPath + ".pending";
+            writeFileSync(pendingPath, JSON.stringify(servers), {
+              mode: 0o600,
+            });
+            renameSync(pendingPath, configPath);
+          },
           update: (notification) => client.sessionUpdate(notification),
           // Notifications are sent in Pi event order. Lody owns the application lease
           // and gates session updates after the matching Core notification arrives.
@@ -146,10 +169,15 @@ export function serve(stream: Stream, piArgs: string[] = []) {
       return runtime;
     };
     const validate = (request: { mcpServers?: unknown[] }) => {
-      if (request.mcpServers?.length)
+      if (
+        request.mcpServers?.some(
+          (server) =>
+            !server || typeof server !== "object" || !("command" in server),
+        )
+      )
         throw RequestError.invalidRequest(
           undefined,
-          "Pi does not support workspace MCP servers",
+          "Pi supports stdio MCP servers only",
         );
     };
     return {
