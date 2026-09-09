@@ -701,9 +701,30 @@ export class PiRpcConnection implements AgentConnection {
           run.cancelled ? "Cancelled" : undefined,
         );
         break;
-      case "extension_error":
-        run.error = z.object({ error: z.string() }).parse(event).error;
+      case "extension_error": {
+        const diagnostic = z
+          .object({ event: z.string(), error: z.string() })
+          .parse(event);
+        // Pi acknowledges a handled command even when its handler throws. Ordinary
+        // extension callbacks are diagnostics, not authority over the model result.
+        if (diagnostic.event === "command" && !run.started) {
+          run.error = diagnostic.error;
+        } else {
+          await this.update({
+            sessionUpdate: "session_info_update",
+            _meta: {
+              lody: {
+                notice: {
+                  level: "warning",
+                  message: diagnostic.error,
+                  source: "pi",
+                },
+              },
+            },
+          });
+        }
         break;
+      }
     }
   }
 

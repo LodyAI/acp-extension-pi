@@ -693,6 +693,57 @@ describe("native Pi connection", () => {
     p.close();
   });
 
+  it.each(["before", "after", "handled", "model-error"])(
+    "keeps extension diagnostics separate from the result: %s",
+    async (phase) => {
+      const p = peer();
+      await start(p);
+      const diagnostic = () =>
+        p.emit({
+          type: "extension_error",
+          event: phase === "before" ? "input" : "agent_end",
+          error: "Extension callback failed",
+        });
+      p.setPrompt((request) => {
+        if (phase === "before" || phase === "handled") diagnostic();
+        p.reply(request);
+        if (phase === "handled") return;
+        p.emit({ type: "agent_start" });
+        p.emit({ type: "message_start", message: { role: "assistant" } });
+        p.emit({
+          type: "message_end",
+          message: {
+            role: "assistant",
+            stopReason: phase === "model-error" ? "error" : "stop",
+            errorMessage: "Model failed",
+          },
+        });
+        if (phase === "after" || phase === "model-error") diagnostic();
+        p.emit({ type: "agent_settled" });
+      });
+      const result = p.client.prompt(prompt);
+      if (phase === "model-error")
+        await expect(result).rejects.toThrow("Model failed");
+      else await expect(result).resolves.toEqual({ stopReason: "end_turn" });
+      expect(
+        p.updates.map(({ update }) => update._meta?.lody?.notice),
+      ).toContainEqual({
+        level: "warning",
+        message: "Extension callback failed",
+        source: "pi",
+      });
+      p.setPrompt((request) => {
+        p.emit({ type: "agent_start" });
+        p.reply(request);
+        p.emit({ type: "agent_settled" });
+      });
+      await expect(p.client.prompt(prompt)).resolves.toEqual({
+        stopReason: "end_turn",
+      });
+      p.close();
+    },
+  );
+
   it("reports handled input without misclassifying errors or empty model runs", async () => {
     const p = peer();
     await start(p);
@@ -722,6 +773,16 @@ describe("native Pi connection", () => {
     await expect(p.client.prompt(prompt)).resolves.toEqual({
       stopReason: "end_turn",
     });
+    expect(notices()).toHaveLength(1);
+    p.setPrompt((request) => {
+      p.emit({
+        type: "extension_error",
+        event: "command",
+        error: "Command failed",
+      });
+      p.reply(request);
+    });
+    await expect(p.client.prompt(prompt)).rejects.toThrow("Command failed");
     expect(notices()).toHaveLength(1);
     p.close();
   });
