@@ -405,6 +405,7 @@ export class PiRpcConnection implements AgentConnection {
     try {
       configOptions = await this.configOptions(state);
     } catch (error) {
+      this.rpc.assertOpen();
       process.stderr.write(
         `Pi configuration refresh failed: ${String(error)}\n`,
       );
@@ -850,7 +851,12 @@ export class PiRpcConnection implements AgentConnection {
     // Pi owns the cumulative session total, including compaction and native resume.
     // Never feed per-message snapshots into the host's session-snapshot channel.
     const parsed = statsSchema.safeParse(
-      await this.rpc.request("get_session_stats").catch(() => undefined),
+      await this.rpc.request("get_session_stats").catch(() => {
+        // An unavailable snapshot is optional; a failed connection is not,
+        // including startup/configuration where there is no active prompt to reject.
+        this.rpc.assertOpen();
+        return undefined;
+      }),
     );
     if (
       !parsed.success ||

@@ -247,6 +247,27 @@ const text = (value: string) => ({
 });
 
 describe("native Pi connection", () => {
+  it.each(["reply-error", "eof"])(
+    "distinguishes optional initial stats failure from a dead Pi transport (%s)",
+    async (failure) => {
+      const p = peer();
+      p.setStats((request) => {
+        if (failure === "eof") p.close();
+        else p.reply(request, undefined, "Stats unavailable");
+      });
+      const result = start(p);
+      if (failure === "eof") {
+        await expect(result).rejects.toThrow("Pi RPC connection closed");
+        await expect(p.client.prompt(prompt)).rejects.toThrow();
+      } else {
+        await expect(result).resolves.toMatchObject({
+          sessionId: prompt.sessionId,
+        });
+        p.close();
+      }
+    },
+  );
+
   it("rejects extension-owned replacement and failed reload, then allows explicit recovery", async () => {
     const p = peer();
     await start(p);

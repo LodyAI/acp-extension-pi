@@ -37,7 +37,7 @@ export class PiTransport {
   }
 
   async send(value: Record<string, unknown>): Promise<void> {
-    if (this.failure) throw this.failure;
+    this.assertOpen();
     try {
       await this.writer.write(
         new TextEncoder().encode(JSON.stringify(value) + "\n"),
@@ -65,6 +65,10 @@ export class PiTransport {
 
   async drain(): Promise<void> {
     await this.events;
+    this.assertOpen();
+  }
+
+  assertOpen(): void {
     if (this.failure) throw this.failure;
   }
 

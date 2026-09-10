@@ -28,6 +28,8 @@ Lody workspace packages or fork its session executor here.
   Preserve final token-limit termination and accepted cancellation on every prompt path.
   Settle those outcomes in one place. Ordinary post-turn configuration refresh failure
   is diagnostic; native identity, transport and cleanup failures must not be hidden.
+  Optional query fallbacks check the transport's own failure state, including
+  session setup where there is no active prompt to reject on disconnection.
 - MCP uses standard ACP stdio configuration; reject unsupported transports before
   starting Pi. Pi's extension owns MCP clients/tools and native cancellation.
   Write runtime configuration only under the existing session/config exclusion;
