@@ -311,18 +311,12 @@ export class PiRpcConnection implements AgentConnection {
       await this.readState();
       await this.rpc.drain();
       this.assertReady();
+      let responseText: string | undefined;
       if (message.trim() === "/stats" && images.length === 0) {
         const stats = await this.reportUsage();
         if (!stats) run.error = "Pi session usage is unavailable";
-        if (stats && !run.cancelled)
-          await this.update({
-            sessionUpdate: "agent_message_chunk",
-            content: {
-              type: "text",
-              text: `Pi session usage: ${stats.tokens.input} input, ${stats.tokens.output} output, ${stats.tokens.cacheRead} cache read, ${stats.tokens.cacheWrite} cache write tokens; $${stats.cost.toFixed(6)}.`,
-            },
-          });
-        this.finishRun(run);
+        if (stats)
+          responseText = `Pi session usage: ${stats.tokens.input} input, ${stats.tokens.output} output, ${stats.tokens.cacheRead} cache read, ${stats.tokens.cacheWrite} cache write tokens; $${stats.cost.toFixed(6)}.`;
       } else if (
         /^\/compact(?:\s|$)/.test(message.trim()) &&
         images.length === 0
@@ -334,45 +328,42 @@ export class PiRpcConnection implements AgentConnection {
           });
         } catch (error) {
           run.error = error instanceof Error ? error.message : String(error);
-        } finally {
-          await this.rpc.drain();
-          await this.reportUsage();
         }
-        if (!run.cancelled && !run.error)
-          await this.update({
-            sessionUpdate: "agent_message_chunk",
-            content: { type: "text", text: "Context compacted." },
-          });
-        this.finishRun(run);
+        responseText = "Context compacted.";
       } else {
         await this.rpc.request("prompt", {
           message,
           ...(images.length ? { images } : {}),
         });
-        // Pi input hooks / extension commands can handle input without starting an agent run.
-        // Query only after acceptance, then drain earlier events. Never use an idle snapshot to
-        // finish a run that started: retry and compaction gaps also look idle.
-        await this.waitForNativeCompletion(run);
-        const pending = this.pendingSteer;
-        if (pending && !run.cancelled) {
-          await this.rpc.request("clear_queue");
-          await this.rpc.drain();
-          if (this.pendingSteer === pending && !run.cancelled)
-            pending.applied.reject(
-              acp.RequestError.invalidRequest(
-                undefined,
-                "Pi settled before steer delivery",
-              ),
-            );
-        }
-        await this.refreshConfigOptions();
+      }
+      await this.waitForNativeCompletion(run);
+      const pending = this.pendingSteer;
+      if (pending && !run.cancelled) {
+        await this.rpc.request("clear_queue");
+        await this.rpc.drain();
+        if (this.pendingSteer === pending && !run.cancelled)
+          pending.applied.reject(
+            acp.RequestError.invalidRequest(
+              undefined,
+              "Pi settled before steer delivery",
+            ),
+          );
+      }
+      await this.refreshConfigOptions();
+      if (message.trim() !== "/stats" || images.length)
         await this.reportUsage();
-        if (!run.started && !run.cancelled && !run.error)
+      if (!run.cancelled && !run.error) {
+        if (responseText)
+          await this.update({
+            sessionUpdate: "agent_message_chunk",
+            content: { type: "text", text: responseText },
+          });
+        else if (!run.started)
           await this.notice(
             "Pi processed this input without starting a model turn.",
           );
-        this.finishRun(run);
       }
+      this.finishRun(run);
       return await run.promise;
     } finally {
       await run.cancellation?.catch(() => undefined);
