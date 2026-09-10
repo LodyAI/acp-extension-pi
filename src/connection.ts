@@ -403,6 +403,7 @@ export class PiRpcConnection implements AgentConnection {
       await this.rpc.drain();
       this.assertReady();
       if (
+        run.changed === changed &&
         (!run.started || run.settled) &&
         !state.isStreaming &&
         !state.isCompacting &&

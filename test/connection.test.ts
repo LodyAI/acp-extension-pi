@@ -325,9 +325,9 @@ describe("native Pi connection", () => {
         // Native compaction can begin after ACK while get_state is in flight.
         if (outcome === "success")
           p.setState((query) => {
+            p.reply(query, p.state);
             begin();
             p.setState((next) => p.reply(next, p.state));
-            p.reply(query, p.state);
           });
         else begin();
         p.reply(request);
