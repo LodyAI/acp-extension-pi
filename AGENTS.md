@@ -24,6 +24,8 @@ Lody workspace packages or fork its session executor here.
   inside an otherwise unchanged session file.
 - stdout is exclusively ACP. Diagnostics belong on stderr. Close the owned Pi
   process tree when the ACP transport closes; never silently retry a prompt.
+- Explicitly visible custom messages and UI notifications use ACP output; hidden
+  custom context and internal steering payloads must not become duplicate chat.
 - Ordinary Pi extension errors are notices, not model failures. Preserve failed
   input commands when Pi reports them as handled without starting a model run;
   callback diagnostics must not overwrite the assistant's terminal outcome.

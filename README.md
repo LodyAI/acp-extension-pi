@@ -90,6 +90,8 @@ Settlement is paired with Pi's current idle state: extension callbacks can start
 another model run, which retains the same ACP cancellation and cleanup boundary.
 When a handled input or extension command finishes successfully without starting a
 model run, the adapter emits a neutral Pi notice before returning `end_turn`.
+Visible custom messages and extension notifications are forwarded through ACP.
+Hidden custom context stays hidden; notice severity does not change the model's result.
 Commands and model callbacks can start asynchronous compaction. The adapter waits
 for its native completion before returning or admitting another prompt.
 Cancellation waits for `clear_queue`, `abort` and queued events before classifying

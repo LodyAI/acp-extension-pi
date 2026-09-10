@@ -251,6 +251,67 @@ const text = (value: string) => ({
 });
 
 describe("native Pi connection", () => {
+  it("projects visible extension output without exposing hidden context or turning notices into failure", async () => {
+    const p = peer();
+    await start(p);
+    p.emit({
+      type: "message_end",
+      message: {
+        role: "custom",
+        customType: "fixture",
+        display: true,
+        content: "idle visible",
+      },
+    });
+    p.setPrompt((request) => {
+      for (const [customType, display, content] of [
+        ["fixture", true, "visible"],
+        ["fixture", false, "hidden"],
+        ["lody-steer", true, "owned-steer"],
+      ] as const)
+        p.emit({
+          type: "message_end",
+          message: { role: "custom", customType, display, content },
+        });
+      p.emit({
+        type: "extension_ui_request",
+        id: "notice",
+        method: "notify",
+        message: "extension error notice",
+        notifyType: "error",
+      });
+      p.reply(request);
+    });
+    await expect(p.client.prompt(prompt)).resolves.toEqual({
+      stopReason: "end_turn",
+    });
+    expect(
+      p.updates
+        .filter((n) => n.update.sessionUpdate === "agent_message_chunk")
+        .map((n) => n.update),
+    ).toEqual(
+      ["idle visible", "visible"].map((text) => ({
+        sessionUpdate: "agent_message_chunk",
+        content: { type: "text", text },
+      })),
+    );
+    expect(p.updates).toContainEqual({
+      sessionId: prompt.sessionId,
+      update: {
+        sessionUpdate: "session_info_update",
+        _meta: {
+          lody: {
+            notice: {
+              level: "error",
+              message: "extension error notice",
+              source: "pi",
+            },
+          },
+        },
+      },
+    });
+    p.close();
+  });
   it.each(["success", "error", "cancel", "disconnect"])(
     "settles extension-owned compaction and admits recovery (%s)",
     async (outcome) => {

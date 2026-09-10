@@ -368,19 +368,9 @@ export class PiRpcConnection implements AgentConnection {
         await this.refreshConfigOptions();
         await this.reportUsage();
         if (!run.started && !run.cancelled && !run.error)
-          await this.update({
-            sessionUpdate: "session_info_update",
-            _meta: {
-              lody: {
-                notice: {
-                  level: "info",
-                  message:
-                    "Pi processed this input without starting a model turn.",
-                  source: "pi",
-                },
-              },
-            },
-          });
+          await this.notice(
+            "Pi processed this input without starting a model turn.",
+          );
         this.finishRun(run);
       }
       return await run.promise;
@@ -518,6 +508,16 @@ export class PiRpcConnection implements AgentConnection {
     return this.host.update({ sessionId: this.sessionId, update });
   }
 
+  private notice(
+    message: string,
+    level: "info" | "warning" | "error" = "info",
+  ) {
+    return this.update({
+      sessionUpdate: "session_info_update",
+      _meta: { lody: { notice: { level, message, source: "pi" } } },
+    });
+  }
+
   private observeSession(file: string | undefined): void {
     if (this.sessionId && file !== this.sessionId) {
       this.sessionId = "";
@@ -599,9 +599,45 @@ export class PiRpcConnection implements AgentConnection {
       return;
     }
     if (event.type === "extension_ui_request") {
+      if (event.method === "notify") {
+        const notice = z
+          .object({
+            message: z.string(),
+            notifyType: z.enum(["info", "warning", "error"]).optional(),
+          })
+          .parse(event);
+        await this.notice(notice.message, notice.notifyType);
+        return;
+      }
       const request = questionSchema.parse(event);
       // Do not block the wire/notification queue on a human response.
       void this.question(request).catch(() => undefined);
+      return;
+    }
+    if (
+      event.type === "message_end" &&
+      z.object({ role: z.string() }).parse(event.message).role === "custom"
+    ) {
+      const custom = z
+        .object({
+          customType: z.string(),
+          display: z.boolean(),
+          content: z.union([z.string(), contentSchema]),
+        })
+        .parse(event.message);
+      // The driving ACP turn already owns steering text. Hidden custom context
+      // is for Pi's model, not another visible transcript entry.
+      if (custom.display && custom.customType !== "lody-steer") {
+        const content =
+          typeof custom.content === "string"
+            ? [{ type: "text" as const, text: custom.content }]
+            : custom.content;
+        for (const block of content)
+          await this.update({
+            sessionUpdate: "agent_message_chunk",
+            content: block,
+          });
+      }
       return;
     }
     const run = this.active;
@@ -789,18 +825,7 @@ export class PiRpcConnection implements AgentConnection {
         if (diagnostic.event === "command" && !run.started) {
           run.error = diagnostic.error;
         } else {
-          await this.update({
-            sessionUpdate: "session_info_update",
-            _meta: {
-              lody: {
-                notice: {
-                  level: "warning",
-                  message: diagnostic.error,
-                  source: "pi",
-                },
-              },
-            },
-          });
+          await this.notice(diagnostic.error, "warning");
         }
         break;
       }

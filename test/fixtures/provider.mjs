@@ -50,6 +50,22 @@ export default function (pi) {
       release?.();
     },
   });
+  pi.registerCommand("output-fixture", {
+    description: "Exercise extension output visibility",
+    handler: (_args, ctx) => {
+      pi.sendMessage({
+        customType: "fixture",
+        content: "VISIBLE_EXTENSION_OUTPUT",
+        display: true,
+      });
+      pi.sendMessage({
+        customType: "fixture",
+        content: "HIDDEN_EXTENSION_CONTEXT",
+        display: false,
+      });
+      ctx.ui.notify("EXTENSION_ERROR_NOTICE", "error");
+    },
+  });
   pi.registerCommand("lody-steer", {
     description: "Ordinary extension command with the former internal name",
     handler: async () => {

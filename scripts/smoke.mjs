@@ -410,6 +410,12 @@ try {
       "end_turn",
     );
   }
+  const extensionOutputOffset = updates.length;
+  assert.equal((await prompt("/output-fixture")).stopReason, "end_turn");
+  const extensionOutput = JSON.stringify(updates.slice(extensionOutputOffset));
+  assert(extensionOutput.includes("VISIBLE_EXTENSION_OUTPUT"));
+  assert(extensionOutput.includes("EXTENSION_ERROR_NOTICE"));
+  assert(!extensionOutput.includes("HIDDEN_EXTENSION_CONTEXT"));
   const continuationStarted = new Promise((resolve) => {
     toolStarted = resolve;
   });
