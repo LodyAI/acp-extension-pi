@@ -17,7 +17,6 @@ function wire(
   const failure = deferred<Error>();
   const rpc = new PiTransport(
     {
-      protocol: "pi",
       readable: new ReadableStream({
         start(controller) {
           output = controller;

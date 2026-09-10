@@ -160,7 +160,7 @@ function peer() {
       }
     },
   });
-  const stream: PiStream = { protocol: "pi", readable, writable };
+  const stream: PiStream = { readable, writable };
   emit({
     type: "extension_ui_request",
     method: "notify",

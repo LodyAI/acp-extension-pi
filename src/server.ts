@@ -134,7 +134,6 @@ export function serve(stream: Stream, piArgs: string[] = []) {
       child.stderr!.pipe(process.stderr, { end: false });
       const pi = new PiRpcConnection(
         {
-          protocol: "pi",
           writable: Writable.toWeb(child.stdin!),
           readable: Readable.toWeb(child.stdout!),
         },

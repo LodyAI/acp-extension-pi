@@ -10,7 +10,6 @@ export type AgentConnection = Pick<
   | "request"
 >;
 export type PiStream = {
-  protocol: "pi";
   writable: WritableStream<Uint8Array>;
   readable: ReadableStream<Uint8Array>;
 };

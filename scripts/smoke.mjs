@@ -592,7 +592,6 @@ try {
   });
   const direct = new PiRpcConnection(
     {
-      protocol: "pi",
       writable: new WritableStream({
         write(bytes) {
           const value = JSON.parse(new TextDecoder().decode(bytes));
