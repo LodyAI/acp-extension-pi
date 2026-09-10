@@ -1,4 +1,5 @@
 import type { PiStream } from "../src/types.js";
+import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import type * as acp from "@agentclientprotocol/sdk";
 import { PiRpcConnection, initializeResponse } from "../src/connection.js";
@@ -866,11 +867,11 @@ describe("native Pi connection", () => {
     expect(history[0]?.update).toMatchObject({
       kind: "edit",
       rawInput: {
-        file_path: "/work/a.ts",
+        file_path: resolve("/work", "a.ts"),
         old_string: "old",
         new_string: "new",
       },
-      locations: [{ path: "/work/a.ts" }],
+      locations: [{ path: resolve("/work", "a.ts") }],
     });
     expect(history[1]?.update).toMatchObject({
       status: "completed",
