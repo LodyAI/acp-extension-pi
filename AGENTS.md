@@ -26,6 +26,8 @@ Lody workspace packages or fork its session executor here.
   input commands when Pi reports them as handled without starting a model run;
   callback diagnostics must not overwrite the assistant's terminal outcome.
   Preserve final token-limit termination and accepted cancellation on every prompt path.
+  Settle those outcomes in one place. Ordinary post-turn configuration refresh failure
+  is diagnostic; native identity, transport and cleanup failures must not be hidden.
 - MCP uses standard ACP stdio configuration; reject unsupported transports before
   starting Pi. Pi's extension owns MCP clients/tools and native cancellation.
   Write runtime configuration only under the existing session/config exclusion;
@@ -36,7 +38,10 @@ Lody workspace packages or fork its session executor here.
 - Advertise only implemented capabilities. Permission modes, native history import
   and TUI replacement are not implemented.
 - Use shared `acp-extension-core` contracts, not copied protocol definitions.
-- Pi session stats own cumulative usage, including compaction. Do not infer model
+- Pi session stats own cumulative usage and context occupancy, including compaction.
+  Refresh context snapshots at assistant-message boundaries and settlement; do not
+  derive another context estimate from provider message usage or a cached model.
+  Do not infer model
   attribution for summary/tool charges or turn unknown context occupancy into zero.
   Activity notifications describe Pi operations; they never own run completion.
 - Tests use synthetic inputs and explicit signals; no sleeps or commercial models

@@ -109,7 +109,9 @@ charges, so the adapter sends an explicit empty `modelUsage` breakdown rather th
 letting the host assign the whole session to the current model. Per-model billing
 is not implemented.
 
-After compaction, Pi reports context occupancy as unknown until a later model
+Context occupancy comes only from Pi's session stats, refreshed after each assistant
+message and at settlement, not from per-token provider usage. After compaction,
+Pi reports context occupancy as unknown until a later model
 response. The adapter does not invent a zero or reuse pre-compaction usage as a
 new measurement. Current Lody accepts only numeric occupancy updates, however, so
 its UI retains the previous percentage during this interval. That Host limitation

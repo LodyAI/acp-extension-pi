@@ -89,6 +89,8 @@ function peer() {
     state.thinkingLevel = "off";
     reply(request, state.model);
   };
+  let onModels = (request: Record<string, unknown>) =>
+    reply(request, { models: [model, { ...model, id: "two" }] });
   const writable = new WritableStream<Uint8Array>({
     write(bytes) {
       const request: Record<string, unknown> = JSON.parse(
@@ -121,7 +123,7 @@ function peer() {
           onStats(request);
           break;
         case "get_available_models":
-          reply(request, { models: [model, { ...model, id: "two" }] });
+          onModels(request);
           break;
         case "get_available_thinking_levels":
           reply(request, {
@@ -197,6 +199,9 @@ function peer() {
     },
     setModel(handler: typeof onModel) {
       onModel = handler;
+    },
+    setModels(handler: typeof onModels) {
+      onModels = handler;
     },
     get client() {
       return (client ??= new PiRpcConnection(stream, host));
@@ -296,26 +301,116 @@ describe("native Pi connection", () => {
     },
   );
 
-  it("keeps accepted Stop authoritative while stats is pending", async () => {
+  it.each([false, true])(
+    "keeps accepted Stop authoritative while stats is pending (failed=%s)",
+    async (failed) => {
+      const p = peer();
+      await start(p);
+      const stats = deferred<Record<string, unknown>>();
+      p.setStats((request) => stats.resolve(request));
+      const result = p.client.prompt({
+        ...prompt,
+        prompt: [{ type: "text", text: "/stats" }],
+      });
+      const request = await stats.promise;
+      const stopped = p.client.cancel({ sessionId: prompt.sessionId });
+      p.reply(
+        request,
+        {
+          tokens: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
+          cost: 0,
+        },
+        failed ? "Stats failed" : undefined,
+      );
+      expect(await result).toEqual({ stopReason: "cancelled" });
+      await stopped;
+      expect(
+        p.updates.some((n) => n.update.sessionUpdate === "agent_message_chunk"),
+      ).toBe(false);
+      p.close();
+    },
+  );
+
+  it.each(["stop", "length", "error", "aborted", "handled"])(
+    "keeps %s authoritative when post-turn model options disappear",
+    async (outcome) => {
+      const p = peer();
+      await start(p);
+      p.setPrompt((request) => {
+        p.setModels((query) => p.reply(query, { models: [] }));
+        if (outcome !== "handled") {
+          p.emit({ type: "agent_start" });
+          p.emit({
+            type: "message_end",
+            message: {
+              role: "assistant",
+              stopReason: outcome,
+              errorMessage: "Model failed",
+            },
+          });
+          p.emit({ type: "agent_settled" });
+        }
+        p.reply(request);
+      });
+      const result = p.client.prompt(prompt);
+      if (outcome === "error")
+        await expect(result).rejects.toThrow("Model failed");
+      else
+        expect(await result).toEqual({
+          stopReason:
+            outcome === "length"
+              ? "max_tokens"
+              : outcome === "aborted"
+                ? "cancelled"
+                : "end_turn",
+        });
+      p.close();
+    },
+  );
+
+  it("uses Pi context snapshots instead of assistant usage, preserving unknown occupancy", async () => {
     const p = peer();
     await start(p);
-    const stats = deferred<Record<string, unknown>>();
-    p.setStats((request) => stats.resolve(request));
-    const result = p.client.prompt({
-      ...prompt,
-      prompt: [{ type: "text", text: "/stats" }],
-    });
-    const request = await stats.promise;
-    const stopped = p.client.cancel({ sessionId: prompt.sessionId });
-    p.reply(request, {
-      tokens: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
-      cost: 0,
-    });
-    expect(await result).toEqual({ stopReason: "cancelled" });
-    await stopped;
-    expect(
-      p.updates.some((n) => n.update.sessionUpdate === "agent_message_chunk"),
-    ).toBe(false);
+    for (const tokens of [321, null]) {
+      p.updates.length = 0;
+      p.setStats((query) =>
+        p.reply(query, {
+          tokens: { input: 20, output: 10, cacheRead: 4, cacheWrite: 2 },
+          cost: 0.02,
+          contextUsage: { tokens, contextWindow: 8192 },
+        }),
+      );
+      p.setPrompt((request) => {
+        p.emit({ type: "agent_start" });
+        p.emit({ ...text("answer"), usage: { ...usage, totalTokens: 0 } });
+        p.emit({
+          type: "message_end",
+          message: { role: "assistant", stopReason: "stop", usage },
+        });
+        p.emit({
+          type: "tool_execution_start",
+          toolCallId: "next-tool",
+          toolName: "bash",
+          args: { command: "echo next" },
+        });
+        p.emit({ type: "agent_settled" });
+        p.reply(request);
+      });
+      expect(await p.client.prompt(prompt)).toEqual({ stopReason: "end_turn" });
+      const snapshots = p.updates
+        .map((n) => n.update)
+        .filter((u) => u.sessionUpdate === "usage_update");
+      if (tokens === null) expect(snapshots).toEqual([]);
+      else {
+        expect(snapshots.length).toBeGreaterThan(0);
+        for (const snapshot of snapshots)
+          expect(snapshot).toMatchObject({ used: tokens, size: 8192 });
+        const events = p.updates.map((n) => n.update.sessionUpdate);
+        expect(events.indexOf("usage_update")).toBeLessThan(
+          events.indexOf("tool_call"),
+        );
+      }
+    }
     p.close();
   });
 

@@ -37,14 +37,6 @@ const contentSchema = z.array(
     }),
   ]),
 );
-const usageSchema = z.object({
-  input: z.number().nonnegative(),
-  output: z.number().nonnegative(),
-  cacheRead: z.number().nonnegative(),
-  cacheWrite: z.number().nonnegative(),
-  totalTokens: z.number().nonnegative(),
-  cost: z.object({ total: z.number().nonnegative() }),
-});
 const statsSchema = z.object({
   tokens: z.object({
     input: z.number().nonnegative(),
@@ -116,7 +108,6 @@ export class PiRpcConnection implements AgentConnection {
   private readonly rpc: PiTransport;
   private sessionId = "";
   private cwd = "";
-  private model?: z.infer<typeof modelSchema>;
   private active?: Run;
   private configuring = false;
   private readonly questions = new Map<string, () => Promise<void>>();
@@ -212,9 +203,11 @@ export class PiRpcConnection implements AgentConnection {
     return { sessionId: this.sessionId, configOptions };
   }
 
-  private async configOptions(): Promise<acp.SessionConfigOption[]> {
+  private async configOptions(
+    observedState?: z.infer<typeof stateSchema>,
+  ): Promise<acp.SessionConfigOption[]> {
     const [rawState, rawModels, rawLevels] = await Promise.all([
-      this.readState(),
+      observedState ?? this.readState(),
       this.rpc.request("get_available_models"),
       this.rpc.request("get_available_thinking_levels"),
     ]);
@@ -318,8 +311,8 @@ export class PiRpcConnection implements AgentConnection {
       this.assertReady();
       if (message.trim() === "/stats" && images.length === 0) {
         const stats = await this.reportUsage();
-        if (!stats) throw new Error("Pi session usage is unavailable");
-        if (!run.cancelled)
+        if (!stats) run.error = "Pi session usage is unavailable";
+        if (stats && !run.cancelled)
           await this.update({
             sessionUpdate: "agent_message_chunk",
             content: {
@@ -327,7 +320,7 @@ export class PiRpcConnection implements AgentConnection {
               text: `Pi session usage: ${stats.tokens.input} input, ${stats.tokens.output} output, ${stats.tokens.cacheRead} cache read, ${stats.tokens.cacheWrite} cache write tokens; $${stats.cost.toFixed(6)}.`,
             },
           });
-        run.resolve({ stopReason: run.cancelled ? "cancelled" : "end_turn" });
+        this.finishRun(run);
       } else if (
         /^\/compact(?:\s|$)/.test(message.trim()) &&
         images.length === 0
@@ -338,17 +331,17 @@ export class PiRpcConnection implements AgentConnection {
               message.trim().slice("/compact".length).trim() || undefined,
           });
         } catch (error) {
-          if (!run.cancelled) throw error;
+          run.error = error instanceof Error ? error.message : String(error);
         } finally {
           await this.rpc.drain();
           await this.reportUsage();
         }
-        if (!run.cancelled)
+        if (!run.cancelled && !run.error)
           await this.update({
             sessionUpdate: "agent_message_chunk",
             content: { type: "text", text: "Context compacted." },
           });
-        run.resolve({ stopReason: run.cancelled ? "cancelled" : "end_turn" });
+        this.finishRun(run);
       } else {
         await this.rpc.request("prompt", {
           message,
@@ -366,31 +359,22 @@ export class PiRpcConnection implements AgentConnection {
           !state.isCompacting &&
           state.pendingMessageCount === 0
         ) {
-          if (run.error && !run.cancelled) run.reject(new Error(run.error));
-          else {
-            const configOptions = await this.configOptions();
+          await this.refreshConfigOptions();
+          if (!run.cancelled && !run.error)
             await this.update({
-              sessionUpdate: "config_option_update",
-              configOptions,
-            });
-            if (!run.cancelled)
-              await this.update({
-                sessionUpdate: "session_info_update",
-                _meta: {
-                  lody: {
-                    notice: {
-                      level: "info",
-                      message:
-                        "Pi processed this input without starting a model turn.",
-                      source: "pi",
-                    },
+              sessionUpdate: "session_info_update",
+              _meta: {
+                lody: {
+                  notice: {
+                    level: "info",
+                    message:
+                      "Pi processed this input without starting a model turn.",
+                    source: "pi",
                   },
                 },
-              });
-            run.resolve({
-              stopReason: run.cancelled ? "cancelled" : "end_turn",
+              },
             });
-          }
+          this.finishRun(run);
         }
       }
       return await run.promise;
@@ -407,6 +391,28 @@ export class PiRpcConnection implements AgentConnection {
       run.finished.resolve();
     }
   };
+
+  private finishRun(run: Run): void {
+    if (run.cancelled) run.resolve({ stopReason: "cancelled" });
+    else if (run.error) run.reject(new Error(run.error));
+    else run.resolve({ stopReason: run.stopReason ?? "end_turn" });
+  }
+
+  private async refreshConfigOptions(): Promise<void> {
+    // Identity/transport failures remain fatal. Only the display refresh is optional.
+    const state = await this.readState();
+    try {
+      const configOptions = await this.configOptions(state);
+      await this.update({
+        sessionUpdate: "config_option_update",
+        configOptions,
+      });
+    } catch (error) {
+      process.stderr.write(
+        `Pi configuration refresh failed: ${String(error)}\n`,
+      );
+    }
+  }
 
   cancel: AgentConnection["cancel"] = async (request) => {
     this.assertSession(request.sessionId);
@@ -503,7 +509,6 @@ export class PiRpcConnection implements AgentConnection {
   private async readState() {
     const state = stateSchema.parse(await this.rpc.request("get_state"));
     this.observeSession(state.sessionFile);
-    this.model = state.model ?? undefined;
     return state;
   }
 
@@ -617,19 +622,9 @@ export class PiRpcConnection implements AgentConnection {
                 );
             }
           }
-          const configOptions = await this.configOptions();
-          await this.update({
-            sessionUpdate: "config_option_update",
-            configOptions,
-          });
+          await this.refreshConfigOptions();
           await this.reportUsage();
-          if (run.error && !run.cancelled) run.reject(new Error(run.error));
-          else
-            run.resolve({
-              stopReason: run.cancelled
-                ? "cancelled"
-                : (run.stopReason ?? "end_turn"),
-            });
+          this.finishRun(run);
         })().catch((error: Error) => {
           pending?.applied.reject(error);
           run.reject(error);
@@ -690,8 +685,6 @@ export class PiRpcConnection implements AgentConnection {
             content: { type: "text", text: delta.delta },
           });
         }
-        const usage = usageSchema.safeParse(event.usage);
-        if (usage.success) await this.contextUsage(usage.data.totalTokens);
         break;
       }
       case "message_end": {
@@ -700,20 +693,17 @@ export class PiRpcConnection implements AgentConnection {
             role: z.string(),
             stopReason: z.string().optional(),
             errorMessage: z.string().optional(),
-            usage: z.unknown().optional(),
           })
           .parse(event.message);
         if (message.role !== "assistant") break;
-        const usage = usageSchema.safeParse(message.usage);
-        if (usage.success) {
-          const value = usage.data;
-          await this.contextUsage(value.totalTokens);
-        }
         if (message.stopReason === "error")
           run.error = message.errorMessage ?? "Pi model request failed";
         if (message.stopReason === "aborted") run.cancelled = true;
         run.stopReason =
           message.stopReason === "length" ? "max_tokens" : undefined;
+        // Pi owns validity, compaction boundaries and the matching context window.
+        // Refresh between assistant messages as well as at final settlement.
+        await this.reportUsage();
         break;
       }
       case "tool_execution_start":
@@ -891,15 +881,6 @@ export class PiRpcConnection implements AgentConnection {
         used: contextUsage.tokens,
       });
     return parsed.data;
-  }
-
-  private async contextUsage(used: number): Promise<void> {
-    if (this.model)
-      await this.update({
-        sessionUpdate: "usage_update",
-        size: this.model.contextWindow,
-        used,
-      });
   }
 
   private async tool(event: Record<string, unknown>): Promise<void> {
