@@ -369,6 +369,22 @@ describe("native Pi connection", () => {
     },
   );
 
+  it("does not hide a failed ACP configuration notification as an optional refresh failure", async () => {
+    const p = peer();
+    await start(p);
+    p.host.update = async ({ update }) => {
+      if (update.sessionUpdate === "config_option_update")
+        throw new Error("ACP output closed");
+    };
+    p.setPrompt((request) => {
+      p.emit({ type: "agent_start" });
+      p.emit({ type: "agent_settled" });
+      p.reply(request);
+    });
+    await expect(p.client.prompt(prompt)).rejects.toThrow("ACP output closed");
+    p.close();
+  });
+
   it("uses Pi context snapshots instead of assistant usage, preserving unknown occupancy", async () => {
     const p = peer();
     await start(p);

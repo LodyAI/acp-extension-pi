@@ -401,17 +401,16 @@ export class PiRpcConnection implements AgentConnection {
   private async refreshConfigOptions(): Promise<void> {
     // Identity/transport failures remain fatal. Only the display refresh is optional.
     const state = await this.readState();
+    let configOptions: acp.SessionConfigOption[];
     try {
-      const configOptions = await this.configOptions(state);
-      await this.update({
-        sessionUpdate: "config_option_update",
-        configOptions,
-      });
+      configOptions = await this.configOptions(state);
     } catch (error) {
       process.stderr.write(
         `Pi configuration refresh failed: ${String(error)}\n`,
       );
+      return;
     }
+    await this.update({ sessionUpdate: "config_option_update", configOptions });
   }
 
   cancel: AgentConnection["cancel"] = async (request) => {
