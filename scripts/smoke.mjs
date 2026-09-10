@@ -410,6 +410,22 @@ try {
       "end_turn",
     );
   }
+  const continuationStarted = new Promise((resolve) => {
+    toolStarted = resolve;
+  });
+  const continuation = prompt("follow after settled fixture");
+  await Promise.race([
+    continuationStarted,
+    continuation.then(() => {
+      throw new Error("ACP finished before extension continuation");
+    }),
+  ]);
+  await a.client.cancel({ sessionId: a.id });
+  assert.equal((await continuation).stopReason, "cancelled");
+  assert.equal(
+    (await prompt("recovery after settled continuation Stop")).stopReason,
+    "end_turn",
+  );
   await prompt("/stats");
   await prompt("Prepare manual compaction " + "context ".repeat(300));
   await prompt("/compact retain the fixture verification outcomes");

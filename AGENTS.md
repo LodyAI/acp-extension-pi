@@ -33,8 +33,10 @@ Lody workspace packages or fork its session executor here.
   Optional query fallbacks check the transport's own failure state, including
   session setup where there is no active prompt to reject on disconnection.
   Command ACK and model settlement do not finish extension-triggered compaction.
-  Wait for its native end and refresh state before releasing prompt admission;
-  compaction activity must remain observable after model settlement.
+  The prompt owner waits for native settlement and an idle state snapshot before
+  releasing admission. Events only report progress; they do not independently
+  finish the request. Observe callback-started model work and compaction even after
+  a prior model has settled, so Stop retains ownership through native cleanup.
 - MCP uses standard ACP stdio configuration; reject unsupported transports before
   starting Pi. Pi's extension owns MCP clients/tools and native cancellation.
   Write runtime configuration only under the existing session/config exclusion;

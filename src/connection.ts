@@ -87,7 +87,7 @@ type Run = ReturnType<typeof deferred<acp.PromptResponse>> & {
   activities: Map<string, { id: string; meta: LodyActivityMeta }>;
   finished: ReturnType<typeof deferred<void>>;
   cancellation?: Promise<void>;
-  compaction?: ReturnType<typeof deferred<void>>;
+  changed: ReturnType<typeof deferred<void>>;
   started: boolean;
   settled: boolean;
   cancelled: boolean;
@@ -301,6 +301,7 @@ export class PiRpcConnection implements AgentConnection {
       ...deferred<acp.PromptResponse>(),
       activities: new Map(),
       finished: deferred<void>(),
+      changed: deferred<void>(),
       started: false,
       settled: false,
       cancelled: false,
@@ -351,31 +352,36 @@ export class PiRpcConnection implements AgentConnection {
         // Pi input hooks / extension commands can handle input without starting an agent run.
         // Query only after acceptance, then drain earlier events. Never use an idle snapshot to
         // finish a run that started: retry and compaction gaps also look idle.
-        const state = await this.readAfterCompaction(run);
-        if (
-          !run.started &&
-          !state.isStreaming &&
-          !state.isCompacting &&
-          state.pendingMessageCount === 0
-        ) {
-          await this.refreshConfigOptions();
-          if (run.compaction) await this.reportUsage();
-          if (!run.cancelled && !run.error)
-            await this.update({
-              sessionUpdate: "session_info_update",
-              _meta: {
-                lody: {
-                  notice: {
-                    level: "info",
-                    message:
-                      "Pi processed this input without starting a model turn.",
-                    source: "pi",
-                  },
+        await this.waitForNativeCompletion(run);
+        const pending = this.pendingSteer;
+        if (pending && !run.cancelled) {
+          await this.rpc.request("clear_queue");
+          await this.rpc.drain();
+          if (this.pendingSteer === pending && !run.cancelled)
+            pending.applied.reject(
+              acp.RequestError.invalidRequest(
+                undefined,
+                "Pi settled before steer delivery",
+              ),
+            );
+        }
+        await this.refreshConfigOptions();
+        await this.reportUsage();
+        if (!run.started && !run.cancelled && !run.error)
+          await this.update({
+            sessionUpdate: "session_info_update",
+            _meta: {
+              lody: {
+                notice: {
+                  level: "info",
+                  message:
+                    "Pi processed this input without starting a model turn.",
+                  source: "pi",
                 },
               },
-            });
-          this.finishRun(run);
-        }
+            },
+          });
+        this.finishRun(run);
       }
       return await run.promise;
     } finally {
@@ -398,16 +404,22 @@ export class PiRpcConnection implements AgentConnection {
     else run.resolve({ stopReason: run.stopReason ?? "end_turn" });
   }
 
-  private async readAfterCompaction(run: Run) {
-    // Both commands and model callbacks can start fire-and-forget compaction.
-    // Observe native completion, including work started while querying state.
+  private async waitForNativeCompletion(run: Run) {
+    // Settlement belongs to Pi. A callback can start more work before the old
+    // settled event reaches RPC, so require both settlement and current idle state.
     for (;;) {
-      const compaction = run.compaction;
-      if (compaction) await Promise.race([compaction.promise, run.promise]);
+      const changed = run.changed;
       const state = await this.readState();
       await this.rpc.drain();
       this.assertReady();
-      if (run.compaction === compaction) return state;
+      if (
+        (!run.started || run.settled) &&
+        !state.isStreaming &&
+        !state.isCompacting &&
+        state.pendingMessageCount === 0
+      )
+        return;
+      await Promise.race([changed.promise, run.promise]);
     }
   }
 
@@ -597,13 +609,7 @@ export class PiRpcConnection implements AgentConnection {
       process.stderr.write(`Pi extension diagnostic: ${String(event.error)}\n`);
       return;
     }
-    if (
-      !run ||
-      (run.settled &&
-        event.type !== "compaction_start" &&
-        event.type !== "compaction_end")
-    )
-      return;
+    if (!run) return;
     // Pi creates cancellation controllers after asynchronous preflight. An early
     // abort may see idle; repeat it when either native operation actually starts.
     if (
@@ -618,37 +624,11 @@ export class PiRpcConnection implements AgentConnection {
     switch (event.type) {
       case "agent_start":
         run.started = true;
+        run.settled = false;
         break;
       case "agent_settled": {
         if (!run.started) break;
         run.settled = true;
-        const pending = this.pendingSteer;
-        // Finish outside the event queue: drain must be able to observe a late refusal.
-        // Keep this run active until idle queued input is cleared, so a new prompt
-        // cannot accidentally consume it.
-        void (async () => {
-          if (pending && !run.cancelled) {
-            await this.rpc.drain();
-            if (this.pendingSteer === pending && !run.cancelled) {
-              await this.rpc.request("clear_queue");
-              await this.rpc.drain();
-              if (this.pendingSteer === pending && !run.cancelled)
-                pending.applied.reject(
-                  acp.RequestError.invalidRequest(
-                    undefined,
-                    "Pi settled before steer delivery",
-                  ),
-                );
-            }
-          }
-          await this.refreshConfigOptions();
-          await this.readAfterCompaction(run);
-          await this.reportUsage();
-          this.finishRun(run);
-        })().catch((error: Error) => {
-          pending?.applied.reject(error);
-          run.reject(error);
-        });
         break;
       }
       case "message_start": {
@@ -732,7 +712,6 @@ export class PiRpcConnection implements AgentConnection {
         await this.tool(event);
         break;
       case "compaction_start":
-        run.compaction = deferred<void>();
         await this.startActivity(run, "compaction", "Compact context", {
           version: 1,
           kind: "context_compaction",
@@ -772,7 +751,6 @@ export class PiRpcConnection implements AgentConnection {
           else if (typeof event.errorMessage === "string")
             run.error = event.errorMessage;
         }
-        run.compaction?.resolve();
         break;
       }
       case "auto_retry_start":
@@ -826,6 +804,19 @@ export class PiRpcConnection implements AgentConnection {
         }
         break;
       }
+    }
+    if (
+      typeof event.type === "string" &&
+      [
+        "agent_start",
+        "agent_settled",
+        "compaction_start",
+        "compaction_end",
+        "queue_update",
+      ].includes(event.type)
+    ) {
+      run.changed.resolve();
+      run.changed = deferred<void>();
     }
   }
 

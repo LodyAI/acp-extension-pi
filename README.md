@@ -86,6 +86,8 @@ values; these are never added to the native transcript or command line.
 
 Pi's prompt ACK may describe an input command with no agent run. Started runs wait
 for `agent_settled`, including retry/automatic compaction, rather than `agent_end`.
+Settlement is paired with Pi's current idle state: extension callbacks can start
+another model run, which retains the same ACP cancellation and cleanup boundary.
 When a handled input or extension command finishes successfully without starting a
 model run, the adapter emits a neutral Pi notice before returning `end_turn`.
 Commands and model callbacks can start asynchronous compaction. The adapter waits

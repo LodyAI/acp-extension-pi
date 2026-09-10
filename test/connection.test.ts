@@ -1191,6 +1191,7 @@ describe("native Pi connection", () => {
       tokens: { input: 20, output: 10, cacheRead: 4, cacheWrite: 2 },
       cost: 0.02,
     });
+    p.setStats((request) => p.reply(request));
     await Promise.all([cancelled, repeated, nextResult]);
     await expect(done).resolves.toEqual({ stopReason: "cancelled" });
     expect(p.commands.filter((c) => c.type === "abort")).toHaveLength(1);

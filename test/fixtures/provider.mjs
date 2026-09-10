@@ -9,6 +9,12 @@ export default function (pi) {
   });
   let release;
   let compactAfterRun;
+  let followAfterSettlement = false;
+  pi.on("agent_settled", () => {
+    if (!followAfterSettlement) return;
+    followAfterSettlement = false;
+    pi.sendUserMessage("gate fixture", { deliverAs: "followUp" });
+  });
   pi.on("agent_end", (_event, ctx) => {
     if (!compactAfterRun) return;
     const key = compactAfterRun;
@@ -128,6 +134,8 @@ export default function (pi) {
     });
   }
   pi.on("before_agent_start", (event) => {
+    if (event.prompt === "follow after settled fixture")
+      followAfterSettlement = true;
     if (event.prompt.includes("compact after run fixture"))
       compactAfterRun = event.prompt.endsWith("cancel")
         ? "gate-compact-after-run-cancel"
