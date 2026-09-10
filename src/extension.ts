@@ -1,4 +1,5 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { randomUUID } from "node:crypto";
 import { registerMcpTools } from "./mcp.js";
 /** Loaded inside Pi. Identity travels as native custom-message metadata, never model text. */
 type Content = Array<
@@ -8,15 +9,36 @@ type Content = Array<
 type Context = {
   isIdle(): boolean;
   ui: { notify(message: string, type: "info"): void };
+  sessionManager: { getSessionFile(): string | undefined };
 };
 export default async function lodyExtension(pi: ExtensionAPI): Promise<void> {
-  await registerMcpTools(pi);
   const emit = (ctx: Context, event: unknown) =>
     ctx.ui.notify("lody-rpc:" + JSON.stringify(event), "info");
-  pi.on("session_start", (_event, ctx) => {
-    emit(ctx, { type: "lody_steer_ready", version: 1 });
+  // A private invocation per loaded runtime avoids sharing the public command namespace.
+  const command = `lody-steer-${randomUUID()}`;
+  pi.on("session_shutdown", (_event, ctx) => {
+    emit(ctx, { type: "lody_not_ready" });
   });
-  pi.registerCommand("lody-steer", {
+  const validateTools = await registerMcpTools(pi);
+  pi.on("session_start", (_event, ctx) => {
+    if (!validateTools()) {
+      emit(ctx, { type: "lody_not_ready" });
+      return;
+    }
+    emit(ctx, {
+      type: "lody_steer_ready",
+      version: 1,
+      command,
+      sessionFile: ctx.sessionManager.getSessionFile(),
+    });
+  });
+  pi.on("input", (_event, ctx) => {
+    if (!validateTools()) {
+      emit(ctx, { type: "lody_not_ready" });
+      return { action: "handled" };
+    }
+  });
+  pi.registerCommand(command, {
     description: "Lody internal steering transport",
     async handler(args, ctx) {
       const request = JSON.parse(args) as { steerId: string; content: Content };

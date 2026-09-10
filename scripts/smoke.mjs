@@ -4,10 +4,18 @@ import { once } from "node:events";
 import { watch } from "node:fs";
 import { mkdir, mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { Readable, Writable } from "node:stream";
 import { ClientSideConnection, ndJsonStream } from "@agentclientprotocol/sdk";
+import { LODY_EXTENSION_METHODS } from "acp-extension-core";
+const adapterEntry =
+  process.argv[2] ??
+  fileURLToPath(new URL("../dist/index.js", import.meta.url));
+const adapterDirectory = dirname(adapterEntry);
+const { PiRpcConnection } = await import(
+  pathToFileURL(join(adapterDirectory, "connection.js")).href
+);
 const root = await mkdtemp(join(tmpdir(), "acp-pi-smoke-"));
 await mkdir(join(root, "profile"));
 await writeFile(
@@ -46,8 +54,7 @@ async function start(id, mcpServers = []) {
   const child = spawn(
     process.execPath,
     [
-      process.argv[2] ??
-        fileURLToPath(new URL("../dist/index.js", import.meta.url)),
+      adapterEntry,
       "--provider",
       "lody-fixture",
       "--model",
@@ -55,6 +62,9 @@ async function start(id, mcpServers = []) {
       "--no-extensions",
       "-e",
       fileURLToPath(new URL("../test/fixtures/provider.mjs", import.meta.url)),
+      ...(process.env.PI_QUESTION_EXTENSION
+        ? ["-e", process.env.PI_QUESTION_EXTENSION]
+        : []),
     ],
     {
       cwd: root,
@@ -268,6 +278,73 @@ try {
   );
   await prompt("continue after cancelling question");
 
+  if (process.env.PI_QUESTION_EXTENSION) {
+    for (const [answers, expected] of [
+      [
+        ["2. Same — Second route"],
+        { answer: "Same", wasCustom: false, selectedIndex: 2 },
+      ],
+      [
+        ["3. Type something.", "  My route  "],
+        { answer: "My route", wasCustom: true },
+      ],
+      [
+        ["3. Type something.", "", "1. Same — First route"],
+        { answer: "Same", selectedIndex: 1 },
+      ],
+      [
+        ["3. Type something.", null, "2. Same — Second route"],
+        { answer: "Same", selectedIndex: 2 },
+      ],
+      [[null], { answer: null }],
+    ]) {
+      answerQuestion = async (request) => {
+        assert.equal(request.mode, "form");
+        const value = answers.shift();
+        assert.notEqual(value, undefined);
+        return value === null
+          ? { action: "cancel" }
+          : { action: "accept", content: { answer: value } };
+      };
+      const offset = updates.length;
+      assert.equal((await prompt("question fixture")).stopReason, "end_turn");
+      const result = updates
+        .slice(offset)
+        .find(
+          (u) =>
+            u.sessionUpdate === "tool_call_update" &&
+            u.rawOutput?.details?.question,
+        );
+      assert(result, "actual question tool result must reach ACP");
+      for (const [key, value] of Object.entries(expected))
+        assert.deepEqual(result.rawOutput.details[key], value);
+      assert.equal(answers.length, 0);
+    }
+    let seenQuestion;
+    const arrived = new Promise((resolve) => {
+      seenQuestion = resolve;
+    });
+    let answerLate;
+    answerQuestion = async () => {
+      seenQuestion();
+      return new Promise((resolve) => {
+        answerLate = resolve;
+      });
+    };
+    const waiting = prompt("question fixture");
+    await arrived;
+    await a.client.cancel({ sessionId: a.id });
+    assert.equal((await waiting).stopReason, "cancelled");
+    answerLate({ action: "accept", content: { answer: "late answer" } });
+    assert.equal(
+      (await prompt("recovery after real question Stop")).stopReason,
+      "end_turn",
+    );
+    console.log(
+      "PASS: supplied question extension selection, duplicate labels, custom answer, empty/back, cancel/back, decline, Stop/late answer and recovery.",
+    );
+  }
+
   await prompt("/stats");
   await prompt("/compact retain the fixture verification outcomes");
   const compaction = updates.filter(
@@ -432,6 +509,155 @@ try {
       .split("\n"),
   ))
     await assert.rejects(stat(configPath), { code: "ENOENT" });
+  const c = await start(undefined, mcpServers);
+  const nativePrompt = (text) =>
+    c.client.prompt({ sessionId: c.id, prompt: [{ type: "text", text }] });
+  for (const kind of ["new", "fork", "switch", "reload", "failed-reload"]) {
+    await nativePrompt("baseline");
+    if (kind === "reload") {
+      assert.equal(
+        (await nativePrompt(`/native-${kind}-fixture`)).stopReason,
+        "end_turn",
+      );
+      assert.equal(
+        (await nativePrompt("same file after reload")).stopReason,
+        "end_turn",
+      );
+    } else {
+      await assert.rejects(nativePrompt(`/native-${kind}-fixture`));
+      await assert.rejects(nativePrompt("must not enter changed runtime"));
+      c.id = (await c.client.newSession({ cwd: root, mcpServers })).sessionId;
+    }
+  }
+  const collisionOffset = updates.length;
+  await nativePrompt("dynamic MCP collision fixture");
+  const collisionUpdates = updates.slice(collisionOffset);
+  assert(!JSON.stringify(collisionUpdates).includes("WRONG_MCP_OWNER"));
+  assert(
+    collisionUpdates.some(
+      (u) => u.sessionUpdate === "tool_call_update" && u.status === "failed",
+    ),
+  );
+  await assert.rejects(nativePrompt("must refuse shadowed MCP registry"));
+  await c.stop();
+
+  // Observe Pi's command ACK before releasing the tool: ACP steer resolves only
+  // when Pi consumes the queued message, so waiting for it here would deadlock.
+  const configPath = join(root, "steer-servers.json");
+  await writeFile(configPath, "[]");
+  const native = spawn(
+    process.execPath,
+    [
+      fileURLToPath(
+        new URL(
+          "./bundle/cli.js",
+          import.meta.resolve("@earendil-works/pi-coding-agent"),
+        ),
+      ),
+      "--mode",
+      "rpc",
+      "--provider",
+      "lody-fixture",
+      "--model",
+      "fixture",
+      "--no-extensions",
+      "-e",
+      fileURLToPath(new URL("../test/fixtures/provider.mjs", import.meta.url)),
+      "-e",
+      join(adapterDirectory, "extension.js"),
+    ],
+    {
+      cwd: root,
+      stdio: ["pipe", "pipe", "pipe"],
+      env: {
+        PATH: process.env.PATH,
+        HOME: root,
+        PI_CODING_AGENT_DIR: join(root, "profile"),
+        PI_SKIP_VERSION_CHECK: "1",
+        LODY_PI_MCP_CONFIG: configPath,
+      },
+    },
+  );
+  children.add(native);
+  native.stderr.pipe(process.stderr);
+  let steerRequestId;
+  let acknowledge;
+  const acknowledged = new Promise((resolve) => {
+    acknowledge = resolve;
+  });
+  let wire = "";
+  let gateEntered;
+  const entered = new Promise((resolve) => {
+    gateEntered = resolve;
+  });
+  const direct = new PiRpcConnection(
+    {
+      protocol: "pi",
+      writable: new WritableStream({
+        write(bytes) {
+          const value = JSON.parse(new TextDecoder().decode(bytes));
+          if (
+            value.type === "prompt" &&
+            value.message.startsWith("/lody-steer-")
+          )
+            steerRequestId = value.id;
+          native.stdin.write(bytes);
+        },
+      }),
+      readable: Readable.toWeb(native.stdout).pipeThrough(
+        new TransformStream({
+          transform(bytes, controller) {
+            wire += new TextDecoder().decode(bytes);
+            let end;
+            while ((end = wire.indexOf("\n")) >= 0) {
+              const value = JSON.parse(wire.slice(0, end));
+              wire = wire.slice(end + 1);
+              if (value.type === "response" && value.id === steerRequestId)
+                acknowledge();
+            }
+            controller.enqueue(bytes);
+          },
+        }),
+      ),
+    },
+    {
+      configureMcp: async (servers) =>
+        writeFile(configPath, JSON.stringify(servers)),
+      update: async ({ update }) => {
+        if (
+          update.sessionUpdate === "tool_call" &&
+          update.title === "fixture_gate"
+        )
+          gateEntered();
+      },
+      extension: async () => {},
+      usage: () => {},
+      question: async () => ({ action: "cancel" }),
+    },
+  );
+  await direct.initialize({ protocolVersion: 1 });
+  const directSession = await direct.newSession({ cwd: root, mcpServers: [] });
+  const runningSteer = direct.prompt({
+    sessionId: directSession.sessionId,
+    prompt: [{ type: "text", text: "gate fixture" }],
+  });
+  await entered;
+  const steering = direct.request(LODY_EXTENSION_METHODS.sessionSteer, {
+    sessionId: directSession.sessionId,
+    steerId: "native-owner-proof",
+    prompt: [{ type: "text", text: "steered fixture" }],
+  });
+  await acknowledged;
+  await writeFile(join(root, "release-gate"), "release");
+  assert.deepEqual(await steering, { outcome: "injected" });
+  assert.equal((await runningSteer).stopReason, "end_turn");
+  const nativeExited = once(native, "exit");
+  native.stdin.end();
+  await nativeExited;
+  children.delete(native);
+  console.log(
+    "PASS: native new/fork/switch isolation, same-file reload/reload failure recovery, dynamic MCP collision and steer command ownership.",
+  );
   assert(output.some((text) => text.startsWith("Pi session usage:")));
   console.log(
     "PASS: ACP executable, stdio MCP text/image/error/structured results, MCP cancel/resume/cleanup, unsupported transport refusal, file tool, input command, elicitation cancellation, stats, tool cancellation, process-tree signal shutdown, native restart/resume, failed replacement isolation and recovery.",

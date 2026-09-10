@@ -99,6 +99,7 @@ type Run = ReturnType<typeof deferred<acp.PromptResponse>> & {
   settled: boolean;
   cancelled: boolean;
   error?: string;
+  stopReason?: "max_tokens";
 };
 type Host = {
   configureMcp: (servers: acp.McpServer[]) => Promise<void>;
@@ -119,7 +120,7 @@ export class PiRpcConnection implements AgentConnection {
   private active?: Run;
   private configuring = false;
   private readonly questions = new Map<string, () => Promise<void>>();
-  private steeringReady = false;
+  private steerCommand = "";
   private pendingSteer?: {
     id: string;
     run: Run;
@@ -144,7 +145,7 @@ export class PiRpcConnection implements AgentConnection {
   initialize: AgentConnection["initialize"] = async () => {
     await this.rpc.request("get_state");
     await this.rpc.drain();
-    if (!this.steeringReady)
+    if (!this.steerCommand)
       throw new Error("Required Lody Pi extension did not initialize");
     return initializeResponse();
   };
@@ -153,7 +154,7 @@ export class PiRpcConnection implements AgentConnection {
     return this.configure(async () => {
       this.cwd = request.cwd;
       await this.host.configureMcp(request.mcpServers ?? []);
-      this.steeringReady = false;
+      this.steerCommand = "";
       const result = z
         .object({ cancelled: z.boolean() })
         .parse(await this.rpc.request("new_session"));
@@ -176,7 +177,7 @@ export class PiRpcConnection implements AgentConnection {
         );
       }
       await this.host.configureMcp(request.mcpServers ?? []);
-      this.steeringReady = false;
+      this.steerCommand = "";
       const result = z.object({ cancelled: z.boolean() }).parse(
         await this.rpc.request("switch_session", {
           sessionPath: request.sessionId,
@@ -202,6 +203,10 @@ export class PiRpcConnection implements AgentConnection {
         if (typeof value === "string") await this.setOption(id, value);
       }
     }
+    const state = await this.readState();
+    if (!state.sessionFile)
+      throw new Error("Pi did not provide a persistent session file");
+    this.sessionId = state.sessionFile;
     const configOptions = await this.configOptions();
     await this.reportUsage();
     return { sessionId: this.sessionId, configOptions };
@@ -209,15 +214,13 @@ export class PiRpcConnection implements AgentConnection {
 
   private async configOptions(): Promise<acp.SessionConfigOption[]> {
     const [rawState, rawModels, rawLevels] = await Promise.all([
-      this.rpc.request("get_state"),
+      this.readState(),
       this.rpc.request("get_available_models"),
       this.rpc.request("get_available_thinking_levels"),
     ]);
-    const state = stateSchema.parse(rawState);
+    const state = rawState;
     if (!state.sessionFile)
       throw new Error("Pi did not provide a persistent session file");
-    this.sessionId = state.sessionFile;
-    this.model = state.model ?? undefined;
     const models = z
       .object({ models: z.array(modelSchema) })
       .parse(rawModels).models;
@@ -285,6 +288,7 @@ export class PiRpcConnection implements AgentConnection {
   ) => {
     this.assertSession(request.sessionId);
     return this.configure(async () => {
+      await this.readState();
       if (typeof request.value !== "string")
         throw new Error("Pi configuration requires a select value");
       await this.setOption(request.configId, request.value);
@@ -309,17 +313,21 @@ export class PiRpcConnection implements AgentConnection {
     };
     this.active = run;
     try {
+      await this.readState();
+      await this.rpc.drain();
+      this.assertReady();
       if (message.trim() === "/stats" && images.length === 0) {
         const stats = await this.reportUsage();
         if (!stats) throw new Error("Pi session usage is unavailable");
-        await this.update({
-          sessionUpdate: "agent_message_chunk",
-          content: {
-            type: "text",
-            text: `Pi session usage: ${stats.tokens.input} input, ${stats.tokens.output} output, ${stats.tokens.cacheRead} cache read, ${stats.tokens.cacheWrite} cache write tokens; $${stats.cost.toFixed(6)}.`,
-          },
-        });
-        run.resolve({ stopReason: "end_turn" });
+        if (!run.cancelled)
+          await this.update({
+            sessionUpdate: "agent_message_chunk",
+            content: {
+              type: "text",
+              text: `Pi session usage: ${stats.tokens.input} input, ${stats.tokens.output} output, ${stats.tokens.cacheRead} cache read, ${stats.tokens.cacheWrite} cache write tokens; $${stats.cost.toFixed(6)}.`,
+            },
+          });
+        run.resolve({ stopReason: run.cancelled ? "cancelled" : "end_turn" });
       } else if (
         /^\/compact(?:\s|$)/.test(message.trim()) &&
         images.length === 0
@@ -349,8 +357,9 @@ export class PiRpcConnection implements AgentConnection {
         // Pi input hooks / extension commands can handle input without starting an agent run.
         // Query only after acceptance, then drain earlier events. Never use an idle snapshot to
         // finish a run that started: retry and compaction gaps also look idle.
-        const state = stateSchema.parse(await this.rpc.request("get_state"));
+        const state = await this.readState();
         await this.rpc.drain();
+        this.assertReady();
         if (
           !run.started &&
           !state.isStreaming &&
@@ -359,6 +368,11 @@ export class PiRpcConnection implements AgentConnection {
         ) {
           if (run.error && !run.cancelled) run.reject(new Error(run.error));
           else {
+            const configOptions = await this.configOptions();
+            await this.update({
+              sessionUpdate: "config_option_update",
+              configOptions,
+            });
             if (!run.cancelled)
               await this.update({
                 sessionUpdate: "session_info_update",
@@ -469,7 +483,33 @@ export class PiRpcConnection implements AgentConnection {
   }
 
   private update(update: acp.SessionNotification["update"]): Promise<void> {
+    if (!this.sessionId || !this.steerCommand) return Promise.resolve();
     return this.host.update({ sessionId: this.sessionId, update });
+  }
+
+  private observeSession(file: string | undefined): void {
+    if (this.sessionId && file !== this.sessionId) {
+      this.sessionId = "";
+      this.steerCommand = "";
+      const error = new Error(
+        "Pi changed its native session; explicitly create or resume a session",
+      );
+      this.active?.reject(error);
+      this.pendingSteer?.applied.reject(error);
+      throw error;
+    }
+  }
+
+  private async readState() {
+    const state = stateSchema.parse(await this.rpc.request("get_state"));
+    this.observeSession(state.sessionFile);
+    this.model = state.model ?? undefined;
+    return state;
+  }
+
+  private assertReady(): void {
+    if (!this.steerCommand)
+      throw new Error("Required Lody Pi extension did not initialize");
   }
 
   private async event(event: Record<string, unknown>): Promise<void> {
@@ -481,14 +521,41 @@ export class PiRpcConnection implements AgentConnection {
     ) {
       event = z
         .object({
-          type: z.enum(["lody_steer_ready", "lody_steer_refused"]),
+          type: z.enum([
+            "lody_steer_ready",
+            "lody_steer_refused",
+            "lody_not_ready",
+          ]),
           version: z.number().optional(),
           steerId: z.string().optional(),
+          command: z.string().optional(),
+          sessionFile: z.string().optional(),
         })
         .parse(JSON.parse(event.message.slice("lody-rpc:".length)));
     }
     if (event.type === "lody_steer_ready") {
-      this.steeringReady = event.version === 1;
+      // Lifecycle events precede any output from the replacement runtime.
+      try {
+        this.observeSession(
+          typeof event.sessionFile === "string" ? event.sessionFile : undefined,
+        );
+      } catch {
+        return;
+      }
+      this.steerCommand =
+        event.version === 1 &&
+        typeof event.command === "string" &&
+        /^[a-zA-Z0-9_-]+$/.test(event.command)
+          ? event.command
+          : "";
+      return;
+    }
+    if (event.type === "lody_not_ready") {
+      this.steerCommand = "";
+      this.pendingSteer?.applied.reject(
+        new Error("Pi extension runtime stopped"),
+      );
+      await this.cancelQuestions();
       return;
     }
     if (event.type === "lody_steer_refused") {
@@ -508,6 +575,10 @@ export class PiRpcConnection implements AgentConnection {
       return;
     }
     const run = this.active;
+    if (event.type === "extension_error" && (!run || run.settled)) {
+      process.stderr.write(`Pi extension diagnostic: ${String(event.error)}\n`);
+      return;
+    }
     if (!run || run.settled) return;
     // Pi creates cancellation controllers after asynchronous preflight. An early
     // abort may see idle; repeat it when either native operation actually starts.
@@ -546,11 +617,18 @@ export class PiRpcConnection implements AgentConnection {
                 );
             }
           }
+          const configOptions = await this.configOptions();
+          await this.update({
+            sessionUpdate: "config_option_update",
+            configOptions,
+          });
           await this.reportUsage();
           if (run.error && !run.cancelled) run.reject(new Error(run.error));
           else
             run.resolve({
-              stopReason: run.cancelled ? "cancelled" : "end_turn",
+              stopReason: run.cancelled
+                ? "cancelled"
+                : (run.stopReason ?? "end_turn"),
             });
         })().catch((error: Error) => {
           pending?.applied.reject(error);
@@ -589,7 +667,11 @@ export class PiRpcConnection implements AgentConnection {
             },
           );
         }
-        if (message.role === "assistant") run.error = undefined;
+        if (message.role === "assistant") {
+          run.error = undefined;
+          run.stopReason = undefined;
+          await this.readState();
+        }
         break;
       }
       case "message_update": {
@@ -630,6 +712,8 @@ export class PiRpcConnection implements AgentConnection {
         if (message.stopReason === "error")
           run.error = message.errorMessage ?? "Pi model request failed";
         if (message.stopReason === "aborted") run.cancelled = true;
+        run.stopReason =
+          message.stopReason === "length" ? "max_tokens" : undefined;
         break;
       }
       case "tool_execution_start":
@@ -773,15 +857,22 @@ export class PiRpcConnection implements AgentConnection {
   }
 
   private async reportUsage() {
+    const sessionId = this.sessionId;
     // Pi owns the cumulative session total, including compaction and native resume.
     // Never feed per-message snapshots into the host's session-snapshot channel.
     const parsed = statsSchema.safeParse(
       await this.rpc.request("get_session_stats").catch(() => undefined),
     );
-    if (!parsed.success) return;
+    if (
+      !parsed.success ||
+      !sessionId ||
+      sessionId !== this.sessionId ||
+      !this.steerCommand
+    )
+      return;
     const { tokens, cost, contextUsage } = parsed.data;
     this.host.usage({
-      sessionId: this.sessionId,
+      sessionId,
       usage: {
         inputTokens: tokens.input,
         outputTokens: tokens.output,
@@ -892,7 +983,14 @@ export class PiRpcConnection implements AgentConnection {
         id: request.id,
         cancelled: true,
       });
-    if (!run || run.settled || run.cancelled) return cancel();
+    if (
+      !run ||
+      run.settled ||
+      run.cancelled ||
+      !this.sessionId ||
+      !this.steerCommand
+    )
+      return cancel();
     const options =
       request.method === "confirm" ? ["Yes", "No"] : request.options;
     const respond = async (fields: Record<string, unknown>): Promise<void> => {
@@ -1037,6 +1135,7 @@ export class PiRpcConnection implements AgentConnection {
       })
       .parse(params);
     this.assertSession(request.sessionId);
+    this.assertReady();
     const run = this.active;
     if (
       !run ||
@@ -1060,7 +1159,7 @@ export class PiRpcConnection implements AgentConnection {
       // The extension preserves identity in Pi metadata and atomically injects or refuses.
       await this.rpc.request("prompt", {
         message:
-          "/lody-steer " +
+          `/${this.steerCommand} ` +
           JSON.stringify({
             steerId: request.steerId,
             content: [{ type: "text", text: message }, ...images],

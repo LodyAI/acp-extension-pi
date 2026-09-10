@@ -47,8 +47,7 @@ export function serve(stream: Stream, piArgs: string[] = []) {
     closing = (async () => {
       try {
         const owned = child;
-        if (!owned?.pid || owned.exitCode !== null || owned.signalCode !== null)
-          return;
+        if (!owned?.pid) return;
         if (process.platform === "win32") owned.stdin?.end();
         else {
           // Pi's SIGTERM handler stops tracked detached tools before awaiting shutdown hooks.
@@ -58,7 +57,8 @@ export function serve(stream: Stream, piArgs: string[] = []) {
             /* Already exited. */
           }
         }
-        if (await waitForExit(owned)) return;
+        const exited = await waitForExit(owned);
+        if (exited && process.platform === "win32") return;
         if (process.platform === "win32") {
           await new Promise<void>((resolve) => {
             const killer = spawn(

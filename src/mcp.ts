@@ -1,4 +1,5 @@
 import { readFile } from "node:fs/promises";
+import { fileURLToPath } from "node:url";
 import type { McpServer } from "@agentclientprotocol/sdk";
 import type {
   ExtensionAPI,
@@ -15,7 +16,9 @@ export const MCP_CONFIG_ENV = "LODY_PI_MCP_CONFIG";
 type StdioServer = Extract<McpServer, { command: string }>;
 
 /** Loaded in Pi: native tools own calls and cancellation; the SDK owns transport. */
-export async function registerMcpTools(pi: ExtensionAPI): Promise<void> {
+export async function registerMcpTools(
+  pi: ExtensionAPI,
+): Promise<() => boolean> {
   const configPath = process.env[MCP_CONFIG_ENV];
   if (!configPath) throw new Error("Missing Lody Pi runtime configuration");
   const servers = JSON.parse(
@@ -23,6 +26,23 @@ export async function registerMcpTools(pi: ExtensionAPI): Promise<void> {
   ) as StdioServer[];
   const clients: Client[] = [];
   const tools = new Set<string>();
+  // registerTool belongs to the containing extension, not this helper module.
+  const owner = fileURLToPath(new URL("./extension.js", import.meta.url));
+  const validate = () => {
+    const registered = pi.getAllTools();
+    return [...tools].every((name) =>
+      registered.some(
+        (tool) => tool.name === name && tool.sourceInfo.path === owner,
+      ),
+    );
+  };
+  pi.on("tool_call", (event) => {
+    if (tools.has(event.toolName) && !validate())
+      return {
+        block: true,
+        reason: "MCP tool name is owned by another Pi extension",
+      };
+  });
   const close = async () => {
     await Promise.allSettled(clients.map((client) => client.close()));
   };
@@ -104,4 +124,5 @@ export async function registerMcpTools(pi: ExtensionAPI): Promise<void> {
       "MCP initialization failed; check server configuration and tool names",
     );
   }
+  return validate;
 }

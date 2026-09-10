@@ -1,4 +1,4 @@
-import { writeFileSync, appendFileSync } from "node:fs";
+import { writeFileSync, appendFileSync, watch } from "node:fs";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { Type } from "@sinclair/typebox";
@@ -16,9 +16,17 @@ export default function (pi) {
     parameters: Type.Object({}),
     async execute(_id, _args, signal) {
       await new Promise((resolve) => {
-        release = resolve;
-        if (signal?.aborted) resolve();
-        else signal?.addEventListener("abort", resolve, { once: true });
+        const watcher = watch(process.cwd(), (_event, file) => {
+          if (file === "release-gate") finish();
+        });
+        const finish = () => {
+          watcher.close();
+          signal?.removeEventListener("abort", finish);
+          resolve();
+        };
+        release = finish;
+        if (signal?.aborted) finish();
+        else signal?.addEventListener("abort", finish, { once: true });
       });
       return { content: [{ type: "text", text: "gate released" }] };
     },
@@ -28,6 +36,55 @@ export default function (pi) {
     handler: async () => {
       release?.();
     },
+  });
+  pi.registerCommand("lody-steer", {
+    description: "Ordinary extension command with the former internal name",
+    handler: async () => {
+      throw new Error("Wrong steer owner");
+    },
+  });
+  for (const kind of ["new", "fork", "switch", "reload", "failed-reload"]) {
+    pi.registerCommand(`native-${kind}-fixture`, {
+      description: "Exercise native lifecycle",
+      handler: async (_args, ctx) => {
+        if (kind === "new") await ctx.newSession();
+        else if (kind === "fork")
+          await ctx.fork(ctx.sessionManager.getLeafId(), { position: "at" });
+        else if (kind === "switch")
+          await ctx.newSession({
+            withSession: async (fresh) => {
+              await fresh.switchSession(fresh.sessionManager.getSessionFile());
+            },
+          });
+        else {
+          if (kind === "failed-reload")
+            writeFileSync(
+              process.env.LODY_PI_MCP_CONFIG,
+              JSON.stringify([
+                {
+                  name: "broken",
+                  command: "/missing-mcp-fixture",
+                  args: [],
+                  env: [],
+                },
+              ]),
+            );
+          await ctx.reload();
+        }
+      },
+    });
+  }
+  pi.on("before_agent_start", (event) => {
+    if (event.prompt === "dynamic MCP collision fixture")
+      pi.registerTool({
+        name: "mcp_fixture_echo",
+        label: "Collision",
+        description: "Synthetic conflicting tool",
+        parameters: Type.Object({ value: Type.String() }),
+        execute: async () => ({
+          content: [{ type: "text", text: "WRONG_MCP_OWNER" }],
+        }),
+      });
   });
   pi.on("session_shutdown", async () => {
     if (!blockShutdown) return;
@@ -58,7 +115,9 @@ export default function (pi) {
         writeFileSync("content-observed.json", JSON.stringify(last.content));
       const mcpTool =
         last?.role === "user" &&
-        input.match(/mcp fixture (echo|wait|error|image)/)?.[1];
+        (input.includes("dynamic MCP collision fixture")
+          ? "echo"
+          : input.match(/mcp fixture (echo|wait|error|image)/)?.[1]);
       if (input.includes("process fixture")) {
         blockShutdown = true;
         writeFileSync("pi.pid", `${process.pid}\n`);
@@ -86,34 +145,49 @@ export default function (pi) {
           context.tools?.length &&
           last?.role === "user" &&
           (mcpTool ||
+            input.includes("question fixture") ||
             input.includes("write fixture") ||
             input.includes("gate fixture") ||
             input.includes("process fixture"))
         ) {
           const gate = input.includes("gate fixture");
           const processTool = input.includes("process fixture");
+          const question = input.includes("question fixture");
           const tool = {
             type: "toolCall",
             id: "write-fixture",
-            name: mcpTool
-              ? `mcp_fixture_${mcpTool}`
-              : gate
-                ? "fixture_gate"
-                : processTool
-                  ? "bash"
-                  : "write",
-            arguments: mcpTool
-              ? mcpTool === "echo"
-                ? { value: "native-value" }
-                : {}
-              : gate
-                ? {}
-                : processTool
-                  ? {
-                      command:
-                        "echo $$ > process.pid; exec /bin/cat process.fifo",
-                    }
-                  : { path: "fixture.txt", content: "native pi wrote this\n" },
+            name: question
+              ? "question"
+              : mcpTool
+                ? `mcp_fixture_${mcpTool}`
+                : gate
+                  ? "fixture_gate"
+                  : processTool
+                    ? "bash"
+                    : "write",
+            arguments: question
+              ? {
+                  question: "Choose a route",
+                  options: [
+                    { label: "Same", description: "First route" },
+                    { label: "Same", description: "Second route" },
+                  ],
+                }
+              : mcpTool
+                ? mcpTool === "echo"
+                  ? { value: "native-value" }
+                  : {}
+                : gate
+                  ? {}
+                  : processTool
+                    ? {
+                        command:
+                          "echo $$ > process.pid; exec /bin/cat process.fifo",
+                      }
+                    : {
+                        path: "fixture.txt",
+                        content: "native pi wrote this\n",
+                      },
           };
           message.content = [tool];
           message.stopReason = "toolUse";

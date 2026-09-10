@@ -147,6 +147,18 @@ restart/native resume, and failed session replacement with explicit recovery.
 It requires no provider credentials or network calls after dependency installation.
 Temporary synthetic artifacts are retained at the printed path.
 
+The smoke also covers extension-driven new/fork/switch rejection, same-file reload
+and failed-reload recovery, dynamic MCP tool conflicts, and native steering while
+an ordinary extension owns the former `lody-steer` command name.
+To verify a separately installed `question` tool using Pi's standard select/input
+dialogs, run `PI_QUESTION_EXTENSION=/absolute/path/question.ts pnpm smoke`.
+This optional check covers duplicate option labels, custom answers, empty or
+cancelled input returning to options, question cancellation, Stop and late answers.
+The local question plugin passed this check on 2026-09-10; signed-in Lody desktop
+also passed selecting the second duplicate label, a Chinese custom answer, and
+question cancellation. Custom TUI renderers and native subagent panels are not
+provided by this adapter.
+
 A live check of adapter implementation `3828569` through Lody's existing ACP client
 passed CommandCode / DeepSeek V4 Flash file writes, acknowledged steering and the
 host ownership lease, compaction, stats and process restart/native resume. It used

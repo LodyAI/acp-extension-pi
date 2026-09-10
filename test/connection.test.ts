@@ -104,7 +104,12 @@ function peer() {
             method: "notify",
             message:
               "lody-rpc:" +
-              JSON.stringify({ type: "lody_steer_ready", version: 1 }),
+              JSON.stringify({
+                type: "lody_steer_ready",
+                version: 1,
+                command: "lody-steer",
+                sessionFile: state.sessionFile,
+              }),
           });
           break;
         case "get_state":
@@ -157,7 +162,13 @@ function peer() {
     type: "extension_ui_request",
     method: "notify",
     message:
-      "lody-rpc:" + JSON.stringify({ type: "lody_steer_ready", version: 1 }),
+      "lody-rpc:" +
+      JSON.stringify({
+        type: "lody_steer_ready",
+        version: 1,
+        command: "lody-steer",
+        sessionFile: state.sessionFile,
+      }),
   });
   const updates: acp.SessionNotification[] = [];
   const usages: SessionUsageUpdate[] = [];
@@ -230,6 +241,106 @@ const text = (value: string) => ({
 });
 
 describe("native Pi connection", () => {
+  it("rejects extension-owned replacement and failed reload, then allows explicit recovery", async () => {
+    const p = peer();
+    await start(p);
+    for (const replacement of [false, true]) {
+      p.setPrompt((request) => {
+        p.emit({ type: "lody_not_ready" });
+        if (replacement) {
+          p.state.sessionFile = "/work/replaced.jsonl";
+          p.emit({
+            type: "lody_steer_ready",
+            version: 1,
+            command: "private-steer",
+            sessionFile: p.state.sessionFile,
+          });
+        }
+        p.reply(request);
+      });
+      await expect(p.client.prompt(prompt)).rejects.toThrow(
+        /initialize|changed its native session/,
+      );
+      await expect(p.client.prompt(prompt)).rejects.toThrow();
+      const next = await p.client.newSession({ cwd: "/work", mcpServers: [] });
+      expect(next.sessionId).toBe(p.state.sessionFile);
+    }
+    p.close();
+  });
+
+  it.each([false, true])(
+    "preserves final length but clears it after a successful retry (%s)",
+    async (retry) => {
+      const p = peer();
+      await start(p);
+      p.setPrompt((request) => {
+        p.emit({ type: "agent_start" });
+        p.emit({
+          type: "message_end",
+          message: { role: "assistant", stopReason: "length" },
+        });
+        if (retry) {
+          p.emit({ type: "message_start", message: { role: "assistant" } });
+          p.emit({
+            type: "message_end",
+            message: { role: "assistant", stopReason: "stop" },
+          });
+        }
+        p.emit({ type: "agent_settled" });
+        p.reply(request);
+      });
+      expect(await p.client.prompt(prompt)).toEqual({
+        stopReason: retry ? "end_turn" : "max_tokens",
+      });
+      p.close();
+    },
+  );
+
+  it("keeps accepted Stop authoritative while stats is pending", async () => {
+    const p = peer();
+    await start(p);
+    const stats = deferred<Record<string, unknown>>();
+    p.setStats((request) => stats.resolve(request));
+    const result = p.client.prompt({
+      ...prompt,
+      prompt: [{ type: "text", text: "/stats" }],
+    });
+    const request = await stats.promise;
+    const stopped = p.client.cancel({ sessionId: prompt.sessionId });
+    p.reply(request, {
+      tokens: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
+      cost: 0,
+    });
+    expect(await result).toEqual({ stopReason: "cancelled" });
+    await stopped;
+    expect(
+      p.updates.some((n) => n.update.sessionUpdate === "agent_message_chunk"),
+    ).toBe(false);
+    p.close();
+  });
+
+  it("refreshes extension-selected model and thinking after a handled command", async () => {
+    const p = peer();
+    await start(p);
+    p.setPrompt((request) => {
+      p.state.model = { ...model, id: "two" };
+      p.state.thinkingLevel = "off";
+      p.reply(request);
+    });
+    await p.client.prompt(prompt);
+    expect(
+      p.updates.find((n) => n.update.sessionUpdate === "config_option_update"),
+    ).toMatchObject({
+      update: {
+        configOptions: [
+          { id: "model", currentValue: "fixture/two" },
+          { id: "thinking", currentValue: "off" },
+        ],
+      },
+    });
+    p.close();
+  });
+
   it("does not start a prompt midway through model configuration", async () => {
     const p = peer();
     await p.client.initialize({ protocolVersion: 1 });
@@ -476,7 +587,11 @@ describe("native Pi connection", () => {
     await expect(p.client.prompt(prompt)).resolves.toEqual({
       stopReason: "end_turn",
     });
-    expect(p.updates.at(-1)).toMatchObject({
+    expect(
+      p.updates.findLast(
+        (n) => n.update.sessionUpdate === "agent_message_chunk",
+      ),
+    ).toMatchObject({
       update: { content: { text: "new prompt" } },
     });
     p.close();
@@ -643,7 +758,8 @@ describe("native Pi connection", () => {
     const history = p.updates.filter(
       (n) =>
         n.update.sessionUpdate !== "usage_update" &&
-        !n.update._meta?.lody?.activity,
+        !n.update._meta?.lody?.activity &&
+        n.update.sessionUpdate !== "config_option_update",
     );
     expect(history.map((n) => n.update.sessionUpdate)).toEqual([
       "tool_call",
