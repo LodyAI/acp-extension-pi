@@ -8,6 +8,13 @@ export default function (pi) {
     appendFileSync("mcp-runtime-paths", `${process.env.LODY_PI_MCP_CONFIG}\n`);
   });
   let release;
+  let compactAfterRun;
+  pi.on("agent_end", (_event, ctx) => {
+    if (!compactAfterRun) return;
+    const key = compactAfterRun;
+    compactAfterRun = undefined;
+    ctx.compact({ customInstructions: key });
+  });
   let blockShutdown = false;
   pi.registerTool({
     name: "fixture_gate",
@@ -43,11 +50,57 @@ export default function (pi) {
       throw new Error("Wrong steer owner");
     },
   });
-  for (const kind of ["new", "fork", "switch", "reload", "failed-reload"]) {
+  pi.registerCommand("compact-fixture", {
+    description: "Start asynchronous extension compaction",
+    handler: (args, ctx) => {
+      ctx.compact({ customInstructions: `gate-compact-${args}` });
+    },
+  });
+  pi.on("session_before_compact", async (event) => {
+    if (!event.customInstructions?.startsWith("gate-compact-")) return;
+    const key = event.customInstructions;
+    await new Promise((resolve) => {
+      const finish = () => {
+        watcher.close();
+        event.signal.removeEventListener("abort", finish);
+        resolve();
+      };
+      const watcher = watch(process.cwd(), (_event, file) => {
+        if (file === `${key}-release`) finish();
+      });
+      event.signal.addEventListener("abort", finish, { once: true });
+      writeFileSync(`${key}-ready`, "yes");
+      if (event.signal.aborted) finish();
+    });
+    if (event.signal.aborted) return { cancel: true };
+    return {
+      compaction: {
+        summary: "Synthetic extension summary",
+        firstKeptEntryId: event.preparation.firstKeptEntryId,
+        tokensBefore: event.preparation.tokensBefore,
+      },
+    };
+  });
+  for (const kind of [
+    "new",
+    "fork",
+    "switch",
+    "tree",
+    "reload",
+    "failed-reload",
+  ]) {
     pi.registerCommand(`native-${kind}-fixture`, {
       description: "Exercise native lifecycle",
       handler: async (_args, ctx) => {
-        if (kind === "new") await ctx.newSession();
+        if (kind === "tree") {
+          const before = ctx.sessionManager.getLeafId();
+          const target = ctx.sessionManager
+            .getBranch()
+            .find((entry) => entry.type === "message");
+          const result = await ctx.navigateTree(target.id);
+          if (!result.cancelled || ctx.sessionManager.getLeafId() !== before)
+            throw new Error("Tree navigation changed the ACP conversation");
+        } else if (kind === "new") await ctx.newSession();
         else if (kind === "fork")
           await ctx.fork(ctx.sessionManager.getLeafId(), { position: "at" });
         else if (kind === "switch")
@@ -75,6 +128,10 @@ export default function (pi) {
     });
   }
   pi.on("before_agent_start", (event) => {
+    if (event.prompt.includes("compact after run fixture"))
+      compactAfterRun = event.prompt.endsWith("cancel")
+        ? "gate-compact-after-run-cancel"
+        : "gate-compact-after-run";
     if (event.prompt === "dynamic MCP collision fixture")
       pi.registerTool({
         name: "mcp_fixture_echo",

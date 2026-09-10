@@ -24,6 +24,7 @@ await writeFile(
 );
 const children = new Set();
 let toolStarted;
+let compactionStarted;
 let answerQuestion = async () => ({ action: "cancel" });
 const output = [];
 const updates = [];
@@ -83,6 +84,11 @@ async function start(id, mcpServers = []) {
     () => ({
       sessionUpdate: async ({ update }) => {
         updates.push(update);
+        if (
+          update._meta?.lody?.activity?.kind === "context_compaction" &&
+          update.status === "in_progress"
+        )
+          compactionStarted?.();
         if (
           update.sessionUpdate === "tool_call" &&
           update.title === "fixture_gate"
@@ -345,11 +351,71 @@ try {
     );
   }
 
+  for (const outcome of [
+    "success",
+    "cancel",
+    "after-run",
+    "after-run-cancel",
+  ]) {
+    const cancelled = outcome.endsWith("cancel");
+    await prompt("Prepare extension compaction " + "context ".repeat(300));
+    const ready = readWhenWritten(join(root, `gate-compact-${outcome}-ready`));
+    const started = new Promise((resolve) => {
+      compactionStarted = resolve;
+    });
+    const pending = prompt(
+      outcome.startsWith("after-run")
+        ? "compact after run fixture" + (cancelled ? " cancel" : "")
+        : `/compact-fixture ${outcome}`,
+    );
+    await Promise.race([
+      started,
+      pending.then(() => {
+        throw new Error("Prompt completed before compaction was observed");
+      }),
+    ]);
+    await ready;
+    const queued =
+      outcome === "after-run"
+        ? prompt("queued after extension compaction")
+        : undefined;
+    if (!queued && !outcome.startsWith("after-run"))
+      await assert.rejects(prompt("must not enter during compaction"));
+    if (cancelled) await a.client.cancel({ sessionId: a.id });
+    else await writeFile(join(root, `gate-compact-${outcome}-release`), "yes");
+    assert.equal(
+      (await pending).stopReason,
+      cancelled ? "cancelled" : "end_turn",
+    );
+    if (queued) {
+      assert.equal((await queued).stopReason, "end_turn");
+      const entries = (await readFile(a.id, "utf8"))
+        .trim()
+        .split("\n")
+        .map(JSON.parse);
+      const compacted = entries.findLastIndex(
+        (entry) => entry.type === "compaction",
+      );
+      const next = entries.findIndex(
+        (entry) =>
+          entry.message?.role === "user" &&
+          JSON.stringify(entry.message.content).includes(
+            "queued after extension compaction",
+          ),
+      );
+      assert(next > compacted && compacted >= 0);
+    }
+    assert.equal(
+      (await prompt("recovery after extension compaction")).stopReason,
+      "end_turn",
+    );
+  }
   await prompt("/stats");
+  await prompt("Prepare manual compaction " + "context ".repeat(300));
   await prompt("/compact retain the fixture verification outcomes");
-  const compaction = updates.filter(
-    (u) => u._meta?.lody?.activity?.kind === "context_compaction",
-  );
+  const compaction = updates
+    .filter((u) => u._meta?.lody?.activity?.kind === "context_compaction")
+    .slice(-2);
   assert.deepEqual(
     compaction.map((u) => u.status),
     ["in_progress", "completed"],
@@ -512,9 +578,16 @@ try {
   const c = await start(undefined, mcpServers);
   const nativePrompt = (text) =>
     c.client.prompt({ sessionId: c.id, prompt: [{ type: "text", text }] });
-  for (const kind of ["new", "fork", "switch", "reload", "failed-reload"]) {
+  for (const kind of [
+    "new",
+    "fork",
+    "switch",
+    "tree",
+    "reload",
+    "failed-reload",
+  ]) {
     await nativePrompt("baseline");
-    if (kind === "reload") {
+    if (kind === "reload" || kind === "tree") {
       assert.equal(
         (await nativePrompt(`/native-${kind}-fixture`)).stopReason,
         "end_turn",
@@ -655,7 +728,7 @@ try {
   await nativeExited;
   children.delete(native);
   console.log(
-    "PASS: native new/fork/switch isolation, same-file reload/reload failure recovery, dynamic MCP collision and steer command ownership.",
+    "PASS: native new/fork/switch isolation, tree navigation refusal, command/callback compaction and Stop recovery, same-file reload/reload failure recovery, dynamic MCP collision and steer command ownership.",
   );
   assert(output.some((text) => text.startsWith("Pi session usage:")));
   console.log(

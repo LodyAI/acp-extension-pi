@@ -87,6 +87,7 @@ type Run = ReturnType<typeof deferred<acp.PromptResponse>> & {
   activities: Map<string, { id: string; meta: LodyActivityMeta }>;
   finished: ReturnType<typeof deferred<void>>;
   cancellation?: Promise<void>;
+  compaction?: ReturnType<typeof deferred<void>>;
   started: boolean;
   settled: boolean;
   cancelled: boolean;
@@ -350,9 +351,7 @@ export class PiRpcConnection implements AgentConnection {
         // Pi input hooks / extension commands can handle input without starting an agent run.
         // Query only after acceptance, then drain earlier events. Never use an idle snapshot to
         // finish a run that started: retry and compaction gaps also look idle.
-        const state = await this.readState();
-        await this.rpc.drain();
-        this.assertReady();
+        const state = await this.readAfterCompaction(run);
         if (
           !run.started &&
           !state.isStreaming &&
@@ -360,6 +359,7 @@ export class PiRpcConnection implements AgentConnection {
           state.pendingMessageCount === 0
         ) {
           await this.refreshConfigOptions();
+          if (run.compaction) await this.reportUsage();
           if (!run.cancelled && !run.error)
             await this.update({
               sessionUpdate: "session_info_update",
@@ -396,6 +396,19 @@ export class PiRpcConnection implements AgentConnection {
     if (run.cancelled) run.resolve({ stopReason: "cancelled" });
     else if (run.error) run.reject(new Error(run.error));
     else run.resolve({ stopReason: run.stopReason ?? "end_turn" });
+  }
+
+  private async readAfterCompaction(run: Run) {
+    // Both commands and model callbacks can start fire-and-forget compaction.
+    // Observe native completion, including work started while querying state.
+    for (;;) {
+      const compaction = run.compaction;
+      if (compaction) await Promise.race([compaction.promise, run.promise]);
+      const state = await this.readState();
+      await this.rpc.drain();
+      this.assertReady();
+      if (run.compaction === compaction) return state;
+    }
   }
 
   private async refreshConfigOptions(): Promise<void> {
@@ -584,7 +597,13 @@ export class PiRpcConnection implements AgentConnection {
       process.stderr.write(`Pi extension diagnostic: ${String(event.error)}\n`);
       return;
     }
-    if (!run || run.settled) return;
+    if (
+      !run ||
+      (run.settled &&
+        event.type !== "compaction_start" &&
+        event.type !== "compaction_end")
+    )
+      return;
     // Pi creates cancellation controllers after asynchronous preflight. An early
     // abort may see idle; repeat it when either native operation actually starts.
     if (
@@ -623,6 +642,7 @@ export class PiRpcConnection implements AgentConnection {
             }
           }
           await this.refreshConfigOptions();
+          await this.readAfterCompaction(run);
           await this.reportUsage();
           this.finishRun(run);
         })().catch((error: Error) => {
@@ -712,6 +732,7 @@ export class PiRpcConnection implements AgentConnection {
         await this.tool(event);
         break;
       case "compaction_start":
+        run.compaction = deferred<void>();
         await this.startActivity(run, "compaction", "Compact context", {
           version: 1,
           kind: "context_compaction",
@@ -746,6 +767,12 @@ export class PiRpcConnection implements AgentConnection {
             usedTokensAfter: result?.estimatedTokensAfter,
           },
         );
+        if (!run.started) {
+          if (event.aborted) run.cancelled = true;
+          else if (typeof event.errorMessage === "string")
+            run.error = event.errorMessage;
+        }
+        run.compaction?.resolve();
         break;
       }
       case "auto_retry_start":

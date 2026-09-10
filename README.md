@@ -88,6 +88,8 @@ Pi's prompt ACK may describe an input command with no agent run. Started runs wa
 for `agent_settled`, including retry/automatic compaction, rather than `agent_end`.
 When a handled input or extension command finishes successfully without starting a
 model run, the adapter emits a neutral Pi notice before returning `end_turn`.
+Commands and model callbacks can start asynchronous compaction. The adapter waits
+for its native completion before returning or admitting another prompt.
 Cancellation waits for `clear_queue`, `abort` and queued events before classifying
 pending steer delivery. Natural settlement clears unapplied queued steer before
 allowing another prompt. Unanswered extension questions are cancelled before abort.
@@ -99,6 +101,8 @@ tool processes before the adapter waits for Pi to exit.
 Permission modes, terminal-history import/discovery, session fork, TUI widgets,
 in-app OAuth and managed artifact publication are not implemented. Existing
 third-party `pi-acp` identities are not automatically migrated.
+Native tree navigation is rejected before changing the active branch, even when
+the session file would stay the same.
 Simultaneous terminal editing of an active native session file is not coordinated.
 
 Usage snapshots come from Pi `get_session_stats`, including native history and
@@ -149,7 +153,9 @@ restart/native resume, and failed session replacement with explicit recovery.
 It requires no provider credentials or network calls after dependency installation.
 Temporary synthetic artifacts are retained at the printed path.
 
-The smoke also covers extension-driven new/fork/switch rejection, same-file reload
+The smoke also covers extension-driven new/fork/switch rejection, same-file tree
+navigation refusal, asynchronous compaction from commands and model callbacks,
+compaction cancellation and recovery, same-file reload
 and failed-reload recovery, dynamic MCP tool conflicts, and native steering while
 an ordinary extension owns the former `lody-steer` command name.
 To verify a separately installed `question` tool using Pi's standard select/input

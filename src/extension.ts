@@ -16,6 +16,13 @@ export default async function lodyExtension(pi: ExtensionAPI): Promise<void> {
     ctx.ui.notify("lody-rpc:" + JSON.stringify(event), "info");
   // A private invocation per loaded runtime avoids sharing the public command namespace.
   const command = `lody-steer-${randomUUID()}`;
+  pi.on("session_before_tree", (_event, ctx) => {
+    ctx.ui.notify(
+      "Native tree navigation is not supported through ACP; the current branch is unchanged.",
+      "warning",
+    );
+    return { cancel: true };
+  });
   pi.on("session_shutdown", (_event, ctx) => {
     emit(ctx, { type: "lody_not_ready" });
   });

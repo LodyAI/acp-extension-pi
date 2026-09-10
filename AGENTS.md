@@ -20,6 +20,8 @@ Lody workspace packages or fork its session executor here.
   Pi extension-driven new/fork/switch must invalidate the ACP binding, never silently
   follow the new file. Reload readiness belongs to the loaded extension runtime;
   shutdown invalidates it even when the native file stays the same.
+  Native tree navigation is unsupported: cancel it before it changes the branch
+  inside an otherwise unchanged session file.
 - stdout is exclusively ACP. Diagnostics belong on stderr. Close the owned Pi
   process tree when the ACP transport closes; never silently retry a prompt.
 - Ordinary Pi extension errors are notices, not model failures. Preserve failed
@@ -30,6 +32,9 @@ Lody workspace packages or fork its session executor here.
   is diagnostic; native identity, transport and cleanup failures must not be hidden.
   Optional query fallbacks check the transport's own failure state, including
   session setup where there is no active prompt to reject on disconnection.
+  Command ACK and model settlement do not finish extension-triggered compaction.
+  Wait for its native end and refresh state before releasing prompt admission;
+  compaction activity must remain observable after model settlement.
 - MCP uses standard ACP stdio configuration; reject unsupported transports before
   starting Pi. Pi's extension owns MCP clients/tools and native cancellation.
   Write runtime configuration only under the existing session/config exclusion;

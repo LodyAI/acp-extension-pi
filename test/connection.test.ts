@@ -64,6 +64,7 @@ function peer() {
   };
   let onClearQueue = (request: Record<string, unknown>) => reply(request, {});
   let onCompact = (request: Record<string, unknown>) => reply(request, {});
+  let onState = (request: Record<string, unknown>) => reply(request, state);
   let onStats = (request: Record<string, unknown>) =>
     reply(request, {
       tokens: { input: 20, output: 10, cacheRead: 4, cacheWrite: 2 },
@@ -116,7 +117,7 @@ function peer() {
           });
           break;
         case "get_state":
-          reply(request, state);
+          onState(request);
           if (commands.some((command) => command.type === "prompt"))
             accepted.resolve();
           break;
@@ -192,6 +193,9 @@ function peer() {
     setCompact(handler: typeof onCompact) {
       onCompact = handler;
     },
+    setState(handler: typeof onState) {
+      onState = handler;
+    },
     setStats(handler: typeof onStats) {
       onStats = handler;
     },
@@ -247,6 +251,75 @@ const text = (value: string) => ({
 });
 
 describe("native Pi connection", () => {
+  it.each(["success", "error", "cancel", "disconnect"])(
+    "settles extension-owned compaction and admits recovery (%s)",
+    async (outcome) => {
+      const p = peer();
+      await start(p);
+      p.setPrompt((request) => {
+        const begin = () => {
+          p.state.isCompacting = true;
+          p.emit({ type: "compaction_start", reason: "manual" });
+        };
+        // Native compaction can begin after ACK while get_state is in flight.
+        if (outcome === "success")
+          p.setState((query) => {
+            begin();
+            p.setState((next) => p.reply(next, p.state));
+            p.reply(query, p.state);
+          });
+        else begin();
+        p.reply(request);
+      });
+      const result = p.client.prompt(prompt);
+      const assertion =
+        outcome === "error" || outcome === "disconnect"
+          ? expect(result).rejects.toThrow(
+              outcome === "error" ? "Summary failed" : "closed",
+            )
+          : expect(result).resolves.toMatchObject({
+              stopReason: outcome === "cancel" ? "cancelled" : "end_turn",
+            });
+      await p.promptReceived.promise;
+      if (outcome === "success") await p.accepted.promise;
+      await expect(p.client.prompt(prompt)).rejects.toThrow();
+      const end = () => {
+        p.state.isCompacting = false;
+        p.setStats((request) =>
+          p.reply(request, {
+            tokens: { input: 99, output: 10, cacheRead: 4, cacheWrite: 2 },
+            cost: 0.03,
+          }),
+        );
+        p.emit({
+          type: "compaction_end",
+          reason: "manual",
+          aborted: outcome === "cancel",
+          errorMessage: outcome === "error" ? "Summary failed" : undefined,
+          result: outcome === "success" ? { tokensBefore: 100 } : undefined,
+        });
+      };
+      if (outcome === "cancel") {
+        p.setAbort((request) => {
+          end();
+          p.reply(request);
+        });
+        await p.client.cancel({ sessionId: prompt.sessionId });
+      } else if (outcome === "disconnect") p.close();
+      else end();
+      await assertion;
+      if (outcome !== "disconnect") {
+        expect(p.usages.at(-1)?.usage.inputTokens).toBe(99);
+        p.setPrompt((request) => {
+          p.reply(request);
+        });
+        await expect(p.client.prompt(prompt)).resolves.toMatchObject({
+          stopReason: "end_turn",
+        });
+        p.close();
+      }
+    },
+  );
   it.each(["reply-error", "eof"])(
     "distinguishes optional initial stats failure from a dead Pi transport (%s)",
     async (failure) => {
