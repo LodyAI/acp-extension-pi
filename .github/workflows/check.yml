@@ -20,7 +20,7 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - name: Compile Node-API proof on Node 22
-        run: npm exec --yes --package=node-gyp@11.5.0 -- node-gyp rebuild --directory probe
+        run: npm exec --yes --package=node-gyp@13.0.2 -- node-gyp rebuild --directory probe
       - name: Pack and install without build scripts
         run: |
           npm pack ./probe --ignore-scripts --pack-destination "$env:RUNNER_TEMP"
