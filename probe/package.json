@@ -1,0 +1,8 @@
+{
+  "name": "pi-windows-job-proof",
+  "version": "0.0.0",
+  "private": true,
+  "main": "index.cjs",
+  "files": ["index.cjs", "build/Release/job.node"],
+  "scripts": { "install": "node -e \"require('./index.cjs')\"" }
+}

@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createRequire } from "node:module";
 import {
   AgentSideConnection,
   RequestError,
@@ -37,6 +38,9 @@ function waitForExit(child: ChildProcess): Promise<boolean> {
 
 /** One runtime per ACP connection; Pi owns its native files and tool processes. */
 export function serve(stream: Stream, piArgs: string[] = []) {
+  // ISOLATED PROOF ONLY. Not a production dependency or release decision.
+  if (process.platform === "win32")
+    createRequire(import.meta.url)(process.env.PROOF_MODULE!).join();
   // Never forward extension/resource control flags to the native process.
   const valueFlags = new Set(["--provider", "--model", "--thinking"]);
   for (let i = 0; i < piArgs.length; i++) {
@@ -98,6 +102,8 @@ export function serve(stream: Stream, piArgs: string[] = []) {
       } finally {
         if (configDirectory)
           rmSync(configDirectory, { recursive: true, force: true });
+        // This connection owns the runtime. Releasing its process releases the Job.
+        if (process.platform === "win32") process.exit(0);
       }
     })();
     return closing;

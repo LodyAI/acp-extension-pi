@@ -1,17 +1,16 @@
-name: Check
-on: [push, pull_request]
+name: Windows Job isolation proof
+on:
+  push:
+    branches: [test/pi-windows-job-proof]
 permissions:
   contents: read
 jobs:
-  check:
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, windows-latest]
-    runs-on: ${{ matrix.os }}
+  proof:
+    runs-on: windows-latest
+    timeout-minutes: 12
     defaults:
       run:
-        shell: bash
+        shell: pwsh
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -20,9 +19,24 @@ jobs:
           node-version: 22
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      - run: pnpm check
+      - name: Compile Node-API proof on Node 22
+        run: npm exec --yes --package=node-gyp@11.5.0 -- node-gyp rebuild --directory probe
+      - name: Pack and install without build scripts
+        run: |
+          npm pack ./probe --ignore-scripts --pack-destination "$env:RUNNER_TEMP"
+          npm install --prefix "$env:RUNNER_TEMP/proof-install" --ignore-scripts --omit=dev "$env:RUNNER_TEMP/pi-windows-job-proof-0.0.0.tgz"
+          "PROOF_MODULE=$env:RUNNER_TEMP/proof-install/node_modules/pi-windows-job-proof/index.cjs" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+      - name: Kernel ancestry checks on Node 22
+        run: node probe/verify.cjs
       - run: pnpm build
-      - run: pnpm smoke
-      - run: pnpm pack --pack-destination "$RUNNER_TEMP/pi-package"
-      - run: npm install --prefix "$RUNNER_TEMP/pi-install" --omit=dev "$RUNNER_TEMP"/pi-package/*.tgz
-      - run: node scripts/smoke.mjs "$RUNNER_TEMP/pi-install/node_modules/acp-extension-pi/dist/index.js"
+      - name: Official Pi native smoke with Job-owned adapter
+        run: pnpm smoke
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Same installed binary on Node 24 without rebuilding
+        run: node probe/verify.cjs
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-x64-job-proof
+          path: ${{ runner.temp }}/pi-windows-job-proof-0.0.0.tgz
