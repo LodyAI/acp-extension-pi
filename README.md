@@ -1,14 +1,14 @@
 # acp-extension-pi
 
-Lody-owned ACP adapter for Pi's native RPC runtime. This repository continues the
+Lody-owned ACP adapter for Pi's native SDK runtime. This repository continues the
 working prototype in [Lody PR #464](https://github.com/LodyAI/Lody/pull/464), following
 the maintainer's recommendation to maintain Pi alongside the builtin adapters.
 [Lody Issue #451](https://github.com/LodyAI/Lody/issues/451) tracks product integration.
 
 ```text
-Lody / ACP client -> ACP stdio -> acp-extension-pi -> Pi JSONL RPC
-                                    |
-                                    + bundled extension loaded inside Pi
+Lody / ACP client -> ACP stdio -> adapter -> owned SDK worker -> native AgentSession
+                                               |
+                                               + bundled and user Pi extensions
 ```
 
 The adapter uses the shared `acp-extension-core` contract and pinned
@@ -30,9 +30,12 @@ node dist/index.js
 ```
 
 Configure an ACP client to launch `node` with the absolute path to `dist/index.js`.
-Arguments are forwarded to Pi, for example `--provider commandcode --model
-deepseek/deepseek-v4-flash`. The adapter always adds RPC mode and its bundled
-steering extension. Pi starts in the `session/new` or `session/resume` working
+The worker accepts Pi's provider/model/thinking, tool/resource selection, system
+prompt, extension flags, project trust, offline and session-directory arguments,
+for example `--provider commandcode --model deepseek/deepseek-v4-flash`.
+ACP owns session selection; terminal startup messages and interactive CLI commands
+are not worker startup inputs. The worker uses Pi's native JSONL/UI transport and
+adds its bundled steering extension. Pi starts in the `session/new` or `session/resume` working
 directory, not the ACP client's launch directory. stdout carries only ACP.
 
 Pi reads its own credentials/settings on the execution machine. Authenticate with
@@ -84,10 +87,17 @@ not session identity or durable settings, and normal shutdown removes it. Abrupt
 process termination can leave a private temporary directory containing server env
 values; these are never added to the native transcript or command line.
 
-Pi's prompt ACK may describe an input command with no agent run. Started runs wait
-for `agent_settled`, including retry/automatic compaction, rather than `agent_end`.
-Settlement is paired with Pi's current idle state: extension callbacks can start
-another model run, which retains the same ACP cancellation and cleanup boundary.
+The SDK worker returns a prompt response only after the native prompt and all
+accepted extension calls finish, including callback-started messages and compaction.
+Pi's preflight ACK, `agent_end`, `agent_settled` and idle snapshots are not request
+completion authorities. One operation owner retains native promises across extension
+callbacks, reload and replacement; Pi still executes every model/tool call and owns
+its queues. Native automatic compaction and retries remain inside the native prompt.
+Detached extension work after successful completion starts background work, forwards
+questions/output and holds admission of the next input. Stop also cancels queued
+input, prevents cancelled preflight from starting a provider, and rejects callbacks
+from cancelled ancestry. It waits for cooperative native cleanup; a plugin that never
+returns can hold Stop until the connection is closed and its worker terminated.
 When a handled input or extension command finishes successfully without starting a
 model run, the adapter emits a neutral Pi notice before returning `end_turn`.
 Visible custom messages and extension notifications are forwarded through ACP.
@@ -145,6 +155,11 @@ production dependencies, and runs the same smoke against its installed entry:
 node scripts/smoke.mjs /absolute/install/node_modules/acp-extension-pi/dist/index.js
 ```
 
+SDK smoke tests cover native prompt metadata, fresh/stale contexts, replacement,
+reload, automatic compaction, background work and cancellation. Worker tests gate a
+real extension preflight and prove neither prompt nor Stop returns early, then prove
+the cancelled provider never starts. ACP smoke also answers and cancels extension
+questions started by settled callbacks and detached background work.
 Unit tests cover framing/correlation, lifecycle settlement, retry, cancellation,
 EOF, repeated steering identities and output order, native resume, model configuration,
 usage and interactive input. The executable smoke uses a real pinned Pi runtime
@@ -166,9 +181,10 @@ To verify a separately installed `question` tool using Pi's standard select/inpu
 dialogs, run `PI_QUESTION_EXTENSION=/absolute/path/question.ts pnpm smoke`.
 This optional check covers duplicate option labels, custom answers, empty or
 cancelled input returning to options, question cancellation, Stop and late answers.
-The local question plugin passed this check on 2026-09-10; signed-in Lody desktop
-also passed selecting the second duplicate label, a Chinese custom answer, and
-question cancellation. Custom TUI renderers and native subagent panels are not
+The local question plugin passed again with the SDK worker on 2026-09-11.
+The earlier signed-in Lody desktop check passed selecting the second duplicate
+label, a Chinese custom answer, and question cancellation on the prior RPC adapter.
+Custom TUI renderers and native subagent panels are not
 provided by this adapter.
 
 A live check of adapter implementation `3828569` through Lody's existing ACP client

@@ -7,8 +7,9 @@ Lody workspace packages or fork its session executor here.
   ACP session identity; never replay Lody history or add a session-id map.
 - `package.json` pins the runtime. Keep `src/version.ts` aligned when upgrading and
   verify the upstream RPC lifecycle before changing the pin.
-- Prompt ACK means accepted or handled, not completed. Started runs finish only at
-  `agent_settled`; input commands may finish without a run. Abort clears queues first.
+- The owned SDK worker replies only after the native prompt and all accepted
+  extension calls finish. Native preflight ACK and `agent_settled` are not completion.
+  Abort clears queues first and retains ownership through native cleanup.
   Cancel and admission after cancellation/settlement wait for the same run cleanup,
   including usage reporting and any abort still in flight.
 - Steering is applied only on the matching custom-message metadata, never by text.
@@ -35,10 +36,11 @@ Lody workspace packages or fork its session executor here.
   Optional query fallbacks check the transport's own failure state, including
   session setup where there is no active prompt to reject on disconnection.
   Command ACK and model settlement do not finish extension-triggered compaction.
-  The prompt owner waits for native settlement and an idle state snapshot before
-  releasing admission. Events only report progress; they do not independently
-  finish the request. Observe callback-started model work and compaction even after
-  a prior model has settled, so Stop retains ownership through native cleanup.
+  `Operations` owns native call lifetimes; do not add a second event/state finisher.
+  Events and state queries only report progress and configuration. A detached call
+  after successful completion starts background work and holds subsequent admission.
+  Cancelled ancestry cannot restart work; preflight and late-created compaction
+  must inherit Stop before they can start provider work.
 - MCP uses standard ACP stdio configuration; reject unsupported transports before
   starting Pi. Pi's extension owns MCP clients/tools and native cancellation.
   Write runtime configuration only under the existing session/config exclusion;

@@ -54,12 +54,21 @@ function peer() {
   };
   const emit = (value: unknown) =>
     output.enqueue(new TextEncoder().encode(JSON.stringify(value) + "\n"));
+  let defaultPrompt: Record<string, unknown> | undefined;
+  const finish = () => {
+    emit({ type: "agent_settled" });
+    if (defaultPrompt) {
+      reply(defaultPrompt);
+      defaultPrompt = undefined;
+    }
+  };
   let onPrompt = (request: Record<string, unknown>) => {
+    defaultPrompt = request;
     emit({ type: "agent_start" });
-    reply(request);
+    emit({ type: "message_start", message: { role: "assistant" } });
   };
   let onAbort = (request: Record<string, unknown>) => {
-    emit({ type: "agent_settled" });
+    finish();
     reply(request);
   };
   let onClearQueue = (request: Record<string, unknown>) => reply(request, {});
@@ -218,6 +227,7 @@ function peer() {
     usages,
     host,
     emit,
+    finish,
     commands,
     state,
     replies,
@@ -317,20 +327,11 @@ describe("native Pi connection", () => {
     async (outcome) => {
       const p = peer();
       await start(p);
+      let command!: Record<string, unknown>;
       p.setPrompt((request) => {
-        const begin = () => {
-          p.state.isCompacting = true;
-          p.emit({ type: "compaction_start", reason: "manual" });
-        };
-        // Native compaction can begin after ACK while get_state is in flight.
-        if (outcome === "success")
-          p.setState((query) => {
-            p.reply(query, p.state);
-            begin();
-            p.setState((next) => p.reply(next, p.state));
-          });
-        else begin();
-        p.reply(request);
+        command = request;
+        p.state.isCompacting = true;
+        p.emit({ type: "compaction_start", reason: "manual" });
       });
       const result = p.client.prompt(prompt);
       const assertion =
@@ -342,7 +343,6 @@ describe("native Pi connection", () => {
               stopReason: outcome === "cancel" ? "cancelled" : "end_turn",
             });
       await p.promptReceived.promise;
-      if (outcome === "success") await p.accepted.promise;
       await expect(p.client.prompt(prompt)).rejects.toThrow();
       const end = () => {
         p.state.isCompacting = false;
@@ -359,6 +359,7 @@ describe("native Pi connection", () => {
           errorMessage: outcome === "error" ? "Summary failed" : undefined,
           result: outcome === "success" ? { tokensBefore: 100 } : undefined,
         });
+        p.reply(command);
       };
       if (outcome === "cancel") {
         p.setAbort((request) => {
@@ -447,7 +448,7 @@ describe("native Pi connection", () => {
             message: { role: "assistant", stopReason: "stop" },
           });
         }
-        p.emit({ type: "agent_settled" });
+        p.finish();
         p.reply(request);
       });
       expect(await p.client.prompt(prompt)).toEqual({
@@ -504,7 +505,7 @@ describe("native Pi connection", () => {
               errorMessage: "Model failed",
             },
           });
-          p.emit({ type: "agent_settled" });
+          p.finish();
         }
         p.reply(request);
       });
@@ -533,7 +534,7 @@ describe("native Pi connection", () => {
     };
     p.setPrompt((request) => {
       p.emit({ type: "agent_start" });
-      p.emit({ type: "agent_settled" });
+      p.finish();
       p.reply(request);
     });
     await expect(p.client.prompt(prompt)).rejects.toThrow("ACP output closed");
@@ -565,7 +566,7 @@ describe("native Pi connection", () => {
           toolName: "bash",
           args: { command: "echo next" },
         });
-        p.emit({ type: "agent_settled" });
+        p.finish();
         p.reply(request);
       });
       expect(await p.client.prompt(prompt)).toEqual({ stopReason: "end_turn" });
@@ -628,7 +629,7 @@ describe("native Pi connection", () => {
       turn,
       p.promptReceived.promise.then(() => "sent mid-configuration"),
     ]);
-    if (verdict !== "refused") p.emit({ type: "agent_settled" });
+    if (verdict !== "refused") p.finish();
     p.state.model = { ...model, id: "two" };
     p.reply(command, p.state.model);
     await Promise.all([turn, setting]);
@@ -666,7 +667,7 @@ describe("native Pi connection", () => {
       oldTurn,
       p.promptReceived.promise.then(() => "sent to replaced session"),
     ]);
-    if (verdict !== "refused") p.emit({ type: "agent_settled" });
+    if (verdict !== "refused") p.finish();
     await oldTurn;
     p.close();
     expect(verdict).toBe("refused");
@@ -691,7 +692,7 @@ describe("native Pi connection", () => {
       oldTurn,
       p.promptReceived.promise.then(() => "sent to replaced session"),
     ]);
-    if (verdict !== "refused") p.emit({ type: "agent_settled" });
+    if (verdict !== "refused") p.finish();
     p.reply(command, { cancelled: false });
     await Promise.all([oldTurn, replacing]);
     p.close();
@@ -770,7 +771,7 @@ describe("native Pi connection", () => {
         },
       });
       p.emit(text("second owner"));
-      p.emit({ type: "agent_settled" });
+      p.finish();
     });
     const second = p.client.request(LODY_EXTENSION_METHODS.sessionSteer, {
       sessionId: prompt.sessionId,
@@ -799,7 +800,7 @@ describe("native Pi connection", () => {
     await p.promptReceived.promise;
     await p.accepted.promise;
     p.setPrompt((request) => {
-      p.emit({ type: "agent_settled" });
+      p.finish();
       p.emit({
         type: "extension_ui_request",
         method: "notify",
@@ -842,13 +843,13 @@ describe("native Pi connection", () => {
     });
     const rejected = expect(steer).rejects.toMatchObject({ code: -32600 });
     await queued.promise;
-    p.emit({ type: "agent_settled" });
+    p.finish();
     await done;
     await rejected;
     p.setPrompt((request) => {
       p.emit({ type: "agent_start" });
       p.emit(text(stranded ? "old steer" : "new prompt"));
-      p.emit({ type: "agent_settled" });
+      p.finish();
       p.reply(request);
     });
     await expect(p.client.prompt(prompt)).resolves.toEqual({
@@ -900,7 +901,7 @@ describe("native Pi connection", () => {
               details: { steerId: "cancel-race" },
             },
           });
-        p.emit({ type: "agent_settled" });
+        p.finish();
         p.reply(request);
       });
       await p.client.cancel({ sessionId: prompt.sessionId });
@@ -1020,7 +1021,7 @@ describe("native Pi connection", () => {
       aborted: false,
       willRetry: false,
     });
-    p.emit({ type: "agent_settled" });
+    p.finish();
     await expect(done).resolves.toEqual({ stopReason: "end_turn" });
     const history = p.updates.filter(
       (n) =>
@@ -1089,8 +1090,10 @@ describe("native Pi connection", () => {
         });
       p.setPrompt((request) => {
         if (phase === "before" || phase === "handled") diagnostic();
-        p.reply(request);
-        if (phase === "handled") return;
+        if (phase === "handled") {
+          p.reply(request);
+          return;
+        }
         p.emit({ type: "agent_start" });
         p.emit({ type: "message_start", message: { role: "assistant" } });
         p.emit({
@@ -1102,7 +1105,8 @@ describe("native Pi connection", () => {
           },
         });
         if (phase === "after" || phase === "model-error") diagnostic();
-        p.emit({ type: "agent_settled" });
+        p.finish();
+        p.reply(request);
       });
       const result = p.client.prompt(prompt);
       if (phase === "model-error")
@@ -1118,7 +1122,7 @@ describe("native Pi connection", () => {
       p.setPrompt((request) => {
         p.emit({ type: "agent_start" });
         p.reply(request);
-        p.emit({ type: "agent_settled" });
+        p.finish();
       });
       await expect(p.client.prompt(prompt)).resolves.toEqual({
         stopReason: "end_turn",
@@ -1151,7 +1155,7 @@ describe("native Pi connection", () => {
     p.setPrompt((request) => {
       p.emit({ type: "agent_start" });
       p.reply(request);
-      p.emit({ type: "agent_settled" });
+      p.finish();
     });
     await expect(p.client.prompt(prompt)).resolves.toEqual({
       stopReason: "end_turn",
@@ -1198,7 +1202,7 @@ describe("native Pi connection", () => {
         attempt: 1,
         finalError: "Model unavailable",
       });
-      p.emit({ type: "agent_settled" });
+      p.finish();
     });
     await expect(p.client.prompt(prompt)).rejects.toThrow("Model unavailable");
     expect(
@@ -1261,11 +1265,11 @@ describe("native Pi connection", () => {
     p.close();
   });
 
-  it("cancels a run that starts only after the initial abort acknowledged idle preflight", async () => {
+  it("cancels input during initial state lookup without dispatching a model request", async () => {
     const p = peer();
     await start(p);
     const accepted = deferred<Record<string, unknown>>();
-    p.setPrompt((request) => accepted.resolve(request));
+    p.setState((request) => accepted.resolve(request));
     const idleAbort = deferred();
     p.setAbort((request) => {
       p.reply(request);
@@ -1275,14 +1279,11 @@ describe("native Pi connection", () => {
     const request = await accepted.promise;
     const cancelled = p.client.cancel({ sessionId: prompt.sessionId });
     await idleAbort.promise;
-    p.setAbort((abort) => {
-      p.emit({ type: "agent_settled" });
-      p.reply(abort);
-    });
-    p.emit({ type: "agent_start" });
-    p.reply(request);
+    p.setState((request) => p.reply(request, p.state));
+    p.reply(request, p.state);
     await expect(done).resolves.toEqual({ stopReason: "cancelled" });
     await cancelled;
+    expect(p.commands.some((command) => command.type === "prompt")).toBe(false);
     p.close();
   });
 
@@ -1413,16 +1414,8 @@ describe("native Pi connection", () => {
     p.setCompact(entered.resolve);
     const done = p.client.prompt(compact);
     const command = await entered.promise;
-    let compactionStarted = false;
     p.setAbort((request) => {
-      if (!compactionStarted) {
-        // Pi compact() awaits abort before it creates the compaction controller.
-        // An early Stop can acknowledge idle before that controller exists.
-        p.reply(request);
-        compactionStarted = true;
-        p.emit({ type: "compaction_start", reason: "manual" });
-        return;
-      }
+      p.emit({ type: "compaction_start", reason: "manual" });
       p.emit({
         type: "compaction_end",
         reason: "manual",
@@ -1463,7 +1456,7 @@ describe("native Pi connection", () => {
         errorMessage: "Automatic summary unavailable",
       });
       p.emit(text("Pi continued after the failed automatic summary"));
-      p.emit({ type: "agent_settled" });
+      p.finish();
     });
     await expect(p.client.prompt(prompt)).resolves.toEqual({
       stopReason: "end_turn",
@@ -1596,7 +1589,7 @@ describe("native Pi connection", () => {
       value: "chosen",
     });
     active.emit(text("working"));
-    active.emit({ type: "agent_settled" });
+    active.finish();
     await done;
     expect(
       active.updates.some(

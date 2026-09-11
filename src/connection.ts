@@ -83,17 +83,20 @@ function deferred<T>() {
   void promise.catch(() => undefined);
   return { promise, resolve, reject };
 }
-type Run = ReturnType<typeof deferred<acp.PromptResponse>> & {
+type Progress = {
   activities: Map<string, { id: string; meta: LodyActivityMeta }>;
-  finished: ReturnType<typeof deferred<void>>;
-  cancellation?: Promise<void>;
-  changed: ReturnType<typeof deferred<void>>;
   started: boolean;
-  settled: boolean;
+  modelSettled: boolean;
+  completed: boolean;
   cancelled: boolean;
   error?: string;
   stopReason?: "max_tokens";
 };
+type Run = Progress &
+  ReturnType<typeof deferred<acp.PromptResponse>> & {
+    finished: ReturnType<typeof deferred<void>>;
+    cancellation?: Promise<void>;
+  };
 type Host = {
   configureMcp: (servers: acp.McpServer[]) => Promise<void>;
   update: (notification: acp.SessionNotification) => Promise<void>;
@@ -110,6 +113,7 @@ export class PiRpcConnection implements AgentConnection {
   private sessionId = "";
   private cwd = "";
   private active?: Run;
+  private background?: Progress;
   private configuring = false;
   private readonly questions = new Map<string, () => Promise<void>>();
   private steerCommand = "";
@@ -141,6 +145,10 @@ export class PiRpcConnection implements AgentConnection {
       throw new Error("Required Lody Pi extension did not initialize");
     return initializeResponse();
   };
+
+  close(): void {
+    this.rpc.close();
+  }
 
   newSession: AgentConnection["newSession"] = async (request) => {
     return this.configure(async () => {
@@ -293,7 +301,7 @@ export class PiRpcConnection implements AgentConnection {
   };
 
   prompt: AgentConnection["prompt"] = async (request) => {
-    await this.waitForSettledRun();
+    if (this.active) await this.waitForSettledRun();
     this.assertSession(request.sessionId);
     this.assertIdle();
     const { message, images } = this.promptContent(request.prompt);
@@ -301,9 +309,9 @@ export class PiRpcConnection implements AgentConnection {
       ...deferred<acp.PromptResponse>(),
       activities: new Map(),
       finished: deferred<void>(),
-      changed: deferred<void>(),
       started: false,
-      settled: false,
+      modelSettled: false,
+      completed: false,
       cancelled: false,
     };
     this.active = run;
@@ -311,6 +319,11 @@ export class PiRpcConnection implements AgentConnection {
       await this.readState();
       await this.rpc.drain();
       this.assertReady();
+      if (run.cancelled) {
+        await run.cancellation;
+        this.finishRun(run);
+        return await run.promise;
+      }
       let responseText: string | undefined;
       if (message.trim() === "/stats" && images.length === 0) {
         const stats = await this.reportUsage();
@@ -336,7 +349,11 @@ export class PiRpcConnection implements AgentConnection {
           ...(images.length ? { images } : {}),
         });
       }
-      await this.waitForNativeCompletion(run);
+      // The SDK worker responds only after all accepted native calls drain.
+      // Drain their output before closing question/admission lifetime.
+      await this.rpc.drain();
+      this.assertReady();
+      run.completed = true;
       const pending = this.pendingSteer;
       if (pending && !run.cancelled) {
         await this.rpc.request("clear_queue");
@@ -385,26 +402,6 @@ export class PiRpcConnection implements AgentConnection {
     else run.resolve({ stopReason: run.stopReason ?? "end_turn" });
   }
 
-  private async waitForNativeCompletion(run: Run) {
-    // Settlement belongs to Pi. A callback can start more work before the old
-    // settled event reaches RPC, so require both settlement and current idle state.
-    for (;;) {
-      const changed = run.changed;
-      const state = await this.readState();
-      await this.rpc.drain();
-      this.assertReady();
-      if (
-        run.changed === changed &&
-        (!run.started || run.settled) &&
-        !state.isStreaming &&
-        !state.isCompacting &&
-        state.pendingMessageCount === 0
-      )
-        return;
-      await Promise.race([changed.promise, run.promise]);
-    }
-  }
-
   private async refreshConfigOptions(): Promise<void> {
     // Identity/transport failures remain fatal. Only the display refresh is optional.
     const state = await this.readState();
@@ -424,17 +421,20 @@ export class PiRpcConnection implements AgentConnection {
   cancel: AgentConnection["cancel"] = async (request) => {
     this.assertSession(request.sessionId);
     const run = this.active;
-    if (!run) return;
+    if (!run) {
+      if (this.background) {
+        this.background.cancelled = true;
+        await this.abort();
+      }
+      return;
+    }
     run.cancelled = true;
     await this.cancelRun(run);
     await run.finished.promise;
   };
 
-  private cancelRun(run: Run, afterPreflight = false): Promise<void> {
-    if (!run.cancellation || afterPreflight)
-      run.cancellation = (run.cancellation ?? Promise.resolve()).then(() =>
-        this.abort(),
-      );
+  private cancelRun(run: Run): Promise<void> {
+    run.cancellation ??= this.abort();
     return run.cancellation;
   }
 
@@ -547,6 +547,8 @@ export class PiRpcConnection implements AgentConnection {
             "lody_steer_ready",
             "lody_steer_refused",
             "lody_not_ready",
+            "lody_background_start",
+            "lody_background_end",
           ]),
           version: z.number().optional(),
           steerId: z.string().optional(),
@@ -554,6 +556,27 @@ export class PiRpcConnection implements AgentConnection {
           sessionFile: z.string().optional(),
         })
         .parse(JSON.parse(event.message.slice("lody-rpc:".length)));
+    }
+    if (event.type === "lody_background_start") {
+      this.background = {
+        activities: new Map(),
+        started: false,
+        modelSettled: false,
+        completed: false,
+        cancelled: false,
+      };
+      return;
+    }
+    if (event.type === "lody_background_end") {
+      const progress = this.background;
+      if (progress) {
+        progress.completed = true;
+        for (const key of progress.activities.keys())
+          await this.endActivity(progress, key);
+        await this.cancelQuestions();
+        this.background = undefined;
+      }
+      return;
     }
     if (event.type === "lody_steer_ready") {
       // Lifecycle events precede any output from the replacement runtime.
@@ -632,33 +655,20 @@ export class PiRpcConnection implements AgentConnection {
       }
       return;
     }
-    const run = this.active;
-    if (event.type === "extension_error" && (!run || run.settled)) {
+    const run = this.background ?? this.active;
+    if (event.type === "extension_error" && (!run || run.completed)) {
       process.stderr.write(`Pi extension diagnostic: ${String(event.error)}\n`);
       return;
     }
     if (!run) return;
-    // Pi creates cancellation controllers after asynchronous preflight. An early
-    // abort may see idle; repeat it when either native operation actually starts.
-    if (
-      run.cancelled &&
-      (event.type === "agent_start" || event.type === "compaction_start")
-    )
-      void this.cancelRun(run, true).catch((error: unknown) =>
-        run.reject(
-          error instanceof Error ? error : new Error("Pi cancellation failed"),
-        ),
-      );
     switch (event.type) {
       case "agent_start":
         run.started = true;
-        run.settled = false;
+        run.modelSettled = false;
         break;
-      case "agent_settled": {
-        if (!run.started) break;
-        run.settled = true;
+      case "agent_settled":
+        run.modelSettled = true;
         break;
-      }
       case "message_start": {
         const message = z
           .object({
@@ -822,23 +832,10 @@ export class PiRpcConnection implements AgentConnection {
         break;
       }
     }
-    if (
-      typeof event.type === "string" &&
-      [
-        "agent_start",
-        "agent_settled",
-        "compaction_start",
-        "compaction_end",
-        "queue_update",
-      ].includes(event.type)
-    ) {
-      run.changed.resolve();
-      run.changed = deferred<void>();
-    }
   }
 
   private async startActivity(
-    run: Run,
+    run: Progress,
     key: string,
     title: string,
     meta: LodyActivityMeta,
@@ -857,7 +854,7 @@ export class PiRpcConnection implements AgentConnection {
   }
 
   private async endActivity(
-    run: Run,
+    run: Progress,
     key: string,
     failureReason?: string,
     details: Partial<LodyActivityMeta> = {},
@@ -997,7 +994,7 @@ export class PiRpcConnection implements AgentConnection {
   ): Promise<void> {
     if (!["select", "confirm", "input", "editor"].includes(request.method))
       return;
-    const run = this.active;
+    const run = this.background ?? this.active;
     const cancel = () =>
       this.rpc.send({
         type: "extension_ui_response",
@@ -1006,7 +1003,7 @@ export class PiRpcConnection implements AgentConnection {
       });
     if (
       !run ||
-      run.settled ||
+      run.completed ||
       run.cancelled ||
       !this.sessionId ||
       !this.steerCommand
@@ -1063,9 +1060,9 @@ export class PiRpcConnection implements AgentConnection {
         },
       });
       if (
-        this.active !== run ||
+        (this.active !== run && this.background !== run) ||
         run.cancelled ||
-        run.settled ||
+        run.completed ||
         response.action !== "accept"
       )
         return respond({ cancelled: true });
@@ -1117,7 +1114,10 @@ export class PiRpcConnection implements AgentConnection {
   }
   private async waitForSettledRun(): Promise<void> {
     const run = this.active;
-    if (run?.settled || run?.cancelled) await run.finished.promise;
+    // A new input after model output stops may wait for callback cleanup. This
+    // progress flag never completes the existing request or releases admission.
+    if (run?.modelSettled || run?.completed || run?.cancelled)
+      await run.finished.promise;
   }
   private assertSession(id: string): void {
     if (!this.sessionId || id !== this.sessionId)
@@ -1161,7 +1161,7 @@ export class PiRpcConnection implements AgentConnection {
     if (
       !run ||
       !run.started ||
-      run.settled ||
+      run.completed ||
       run.cancelled ||
       this.pendingSteer
     )
@@ -1179,6 +1179,7 @@ export class PiRpcConnection implements AgentConnection {
     try {
       // The extension preserves identity in Pi metadata and atomically injects or refuses.
       await this.rpc.request("prompt", {
+        streamingBehavior: "steer",
         message:
           `/${this.steerCommand} ` +
           JSON.stringify({

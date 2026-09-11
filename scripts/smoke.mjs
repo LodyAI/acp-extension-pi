@@ -244,6 +244,46 @@ try {
     "native pi wrote this\n",
   );
   await prompt("handled fixture");
+  let sdkQuestionSeen = false;
+  answerQuestion = async () => {
+    sdkQuestionSeen = true;
+    return { action: "accept", content: { answer: "sdk followup answered" } };
+  };
+  await prompt("sdk followup question");
+  assert.equal(
+    sdkQuestionSeen,
+    true,
+    "question after model settlement must remain answerable",
+  );
+  assert.equal(
+    JSON.parse(await readFile(join(root, "fixture-answer.json"), "utf8")).value,
+    "sdk followup answered",
+  );
+  for (const cancel of [false, true]) {
+    let arrived, answer;
+    const seen = new Promise((resolve) => {
+      arrived = resolve;
+    });
+    answerQuestion = () => {
+      arrived();
+      return new Promise((resolve) => {
+        answer = resolve;
+      });
+    };
+    const key = cancel ? "cancel" : "answer";
+    await prompt(`/sdk-background ${key}`);
+    await writeFile(join(root, `sdk-background-${key}`), "yes");
+    await seen;
+    const next = prompt("after background question");
+    if (cancel) await a.client.cancel({ sessionId: a.id });
+    answer({ action: "accept", content: { answer: "background answer" } });
+    assert.equal((await next).stopReason, cancel ? "cancelled" : "end_turn");
+    assert.equal((await prompt("background recovery")).stopReason, "end_turn");
+  }
+  answerQuestion = async () => ({
+    action: "accept",
+    content: { answer: "chosen" },
+  });
   await prompt("/ask-fixture");
   for (const [kind, value] of [
     ["input", "typed"],
@@ -484,10 +524,9 @@ try {
         },
       ],
     }),
-    {
-      code: -32603,
-      data: { details: "Required Lody Pi extension did not initialize" },
-    },
+    (error) =>
+      error.code === -32603 &&
+      /MCP initialization failed/.test(error.data?.details),
   );
   await assert.rejects(
     b.client.prompt({
@@ -643,14 +682,7 @@ try {
   const native = spawn(
     process.execPath,
     [
-      fileURLToPath(
-        new URL(
-          "./bundle/cli.js",
-          import.meta.resolve("@earendil-works/pi-coding-agent"),
-        ),
-      ),
-      "--mode",
-      "rpc",
+      join(adapterDirectory, "worker.js"),
       "--provider",
       "lody-fixture",
       "--model",
@@ -658,8 +690,6 @@ try {
       "--no-extensions",
       "-e",
       fileURLToPath(new URL("../test/fixtures/provider.mjs", import.meta.url)),
-      "-e",
-      join(adapterDirectory, "extension.js"),
     ],
     {
       cwd: root,

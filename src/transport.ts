@@ -72,6 +72,10 @@ export class PiTransport {
     if (this.failure) throw this.failure;
   }
 
+  close(): void {
+    this.fail(new Error("Pi connection closed"));
+  }
+
   private fail(error: unknown): void {
     if (this.failure) return;
     this.failure =

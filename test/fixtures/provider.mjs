@@ -10,7 +10,13 @@ export default function (pi) {
   let release;
   let compactAfterRun;
   let followAfterSettlement = false;
+  let sdkFollow;
   pi.on("agent_settled", () => {
+    if (sdkFollow) {
+      const next = sdkFollow;
+      sdkFollow = undefined;
+      pi.sendUserMessage(next, { expandPromptTemplates: true });
+    }
     if (!followAfterSettlement) return;
     followAfterSettlement = false;
     pi.sendUserMessage("gate fixture", { deliverAs: "followUp" });
@@ -48,6 +54,18 @@ export default function (pi) {
     description: "Release smoke gate",
     handler: async () => {
       release?.();
+    },
+  });
+  pi.registerCommand("sdk-background", {
+    description: "Schedule a synthetic background question",
+    handler: (key) => {
+      const watcher = watch(process.cwd(), (_event, file) => {
+        if (file !== `sdk-background-${key}`) return;
+        watcher.close();
+        pi.sendUserMessage("/ask-fixture input", {
+          expandPromptTemplates: true,
+        });
+      });
     },
   });
   pi.registerCommand("output-fixture", {
@@ -150,6 +168,10 @@ export default function (pi) {
     });
   }
   pi.on("before_agent_start", (event) => {
+    if (event.prompt === "sdk followup question")
+      sdkFollow = "/ask-fixture input";
+    const preflight = event.prompt.match(/^sdk followup preflight (\w+)$/);
+    if (preflight) sdkFollow = `sdk gated child ${preflight[1]}`;
     if (event.prompt === "follow after settled fixture")
       followAfterSettlement = true;
     if (event.prompt.includes("compact after run fixture"))
@@ -166,6 +188,20 @@ export default function (pi) {
           content: [{ type: "text", text: "WRONG_MCP_OWNER" }],
         }),
       });
+  });
+  pi.on("before_agent_start", async (event) => {
+    const child = event.prompt.match(/^sdk gated child (\w+)$/);
+    if (!child) return;
+    const key = child[1];
+    await new Promise((resolve) => {
+      const watcher = watch(process.cwd(), (_event, file) => {
+        if (file === `sdk-release-${key}`) {
+          watcher.close();
+          resolve();
+        }
+      });
+      writeFileSync(`sdk-ready-${key}`, "yes");
+    });
   });
   pi.on("session_shutdown", async () => {
     if (!blockShutdown) return;
@@ -192,6 +228,8 @@ export default function (pi) {
       const stream = createAssistantMessageEventStream();
       const last = context.messages.at(-1);
       const input = JSON.stringify(last?.content);
+      const sdkChild = input.match(/sdk gated child (\w+)/);
+      if (sdkChild) writeFileSync(`sdk-provider-${sdkChild[1]}`, "called");
       if (last?.role === "user" && input.includes("content fixture"))
         writeFileSync("content-observed.json", JSON.stringify(last.content));
       const mcpTool =

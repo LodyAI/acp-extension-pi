@@ -39,12 +39,14 @@ function waitForExit(child: ChildProcess): Promise<boolean> {
 export function serve(stream: Stream, piArgs: string[] = []) {
   let child: ChildProcess | undefined;
   let runtime: Promise<PiRpcConnection> | undefined;
+  let current: PiRpcConnection | undefined;
   let cwd: string | undefined;
   let closing: Promise<void> | undefined;
   let configDirectory: string | undefined;
   const close = (): Promise<void> => {
     if (closing) return closing;
     closing = (async () => {
+      current?.close();
       try {
         const owned = child;
         if (!owned?.pid) return;
@@ -107,29 +109,13 @@ export function serve(stream: Stream, piArgs: string[] = []) {
       configDirectory = mkdtempSync(join(tmpdir(), "lody-pi-mcp-"));
       const configPath = join(configDirectory, "servers.json");
       writeFileSync(configPath, "[]", { mode: 0o600 });
-      const entry = fileURLToPath(
-        new URL(
-          "./bundle/cli.js",
-          import.meta.resolve("@earendil-works/pi-coding-agent"),
-        ),
-      );
-      child = spawn(
-        process.execPath,
-        [
-          entry,
-          ...piArgs,
-          "--mode",
-          "rpc",
-          "-e",
-          fileURLToPath(new URL("./extension.js", import.meta.url)),
-        ],
-        {
-          cwd,
-          env: { ...process.env, [MCP_CONFIG_ENV]: configPath },
-          stdio: ["pipe", "pipe", "pipe"],
-          detached: process.platform !== "win32",
-        },
-      );
+      const entry = fileURLToPath(new URL("./worker.js", import.meta.url));
+      child = spawn(process.execPath, [entry, ...piArgs], {
+        cwd,
+        env: { ...process.env, [MCP_CONFIG_ENV]: configPath },
+        stdio: ["pipe", "pipe", "pipe"],
+        detached: process.platform !== "win32",
+      });
       child.once("exit", () => void close());
       child.stderr!.pipe(process.stderr, { end: false });
       const pi = new PiRpcConnection(
@@ -159,6 +145,7 @@ export function serve(stream: Stream, piArgs: string[] = []) {
           question: (request) => client.unstable_createElicitation(request),
         },
       );
+      current = pi;
       runtime = Promise.race([
         pi.initialize({ protocolVersion: 1 }).then(() => pi),
         new Promise<never>((_resolve, reject) => child!.once("error", reject)),
