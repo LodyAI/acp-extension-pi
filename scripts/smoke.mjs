@@ -245,6 +245,14 @@ try {
   );
   const running = a.prompt("CANCEL_SUB");
   await heldChild;
+  assert.ok(
+    updates.some(
+      (update) =>
+        update.sessionUpdate === "tool_call" &&
+        update._meta?.lody?.task?.description === "Cancelled child" &&
+        update._meta.lody.task.status === "in_progress",
+    ),
+  );
   const active = await a.client.extMethod(
     LODY_EXTENSION_METHODS.subagentsList,
     { sessionId: a.id, activeOnly: true },

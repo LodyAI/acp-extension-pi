@@ -92,7 +92,7 @@ export function registerSubagents(
         startedAtEpochSeconds: Date.now() / 1000,
         endedAtEpochSeconds: null,
       };
-      const publish = () => {
+      const publish = (event: "started" | "updated" = "updated") => {
         const meta: LodyTaskMeta = {
           version: 1,
           taskId: id,
@@ -113,7 +113,7 @@ export function registerSubagents(
           ...(info.stopReason ? { error: info.stopReason } : {}),
           ...(lastToolName ? { lastToolName } : {}),
         };
-        emit(ctx, { type: "lody_subagent", task: meta });
+        emit(ctx, { type: "lody_subagent", event, task: meta });
       };
       const kill = (force: boolean) => {
         if (proc.exitCode !== null || proc.signalCode !== null || !proc.pid)
@@ -150,7 +150,7 @@ export function registerSubagents(
         },
       };
       tasks.set(id, task);
-      publish();
+      publish("started");
       const append = (text: string) => {
         task.output = (task.output + text).slice(-MAX_OUTPUT);
       };

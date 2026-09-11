@@ -598,7 +598,8 @@ export class PiRpcConnection implements AgentConnection {
           .passthrough()
           .parse(payload.task);
         await this.update({
-          sessionUpdate: "tool_call_update",
+          sessionUpdate:
+            payload.event === "started" ? "tool_call" : "tool_call_update",
           toolCallId: task.taskId,
           title: task.description,
           status: task.status,
