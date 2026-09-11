@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
+import { spawn, execFileSync } from "node:child_process";
 import { once } from "node:events";
 import { createServer } from "node:http";
 import { mkdir, mkdtemp, writeFile, access } from "node:fs/promises";
@@ -177,6 +177,7 @@ async function start(sessionId) {
     : await client.newSession({ cwd: root, mcpServers });
   const id = result.sessionId ?? sessionId;
   return {
+    process: child,
     client,
     id,
     prompt: (text) =>
@@ -342,6 +343,62 @@ try {
   const childDisconnected = once(releaseChild, "close");
   await b.close();
   await Promise.all([interrupted, childDisconnected]);
+  if (process.platform === "win32") {
+    for (const crash of ["pi", "adapter"]) {
+      const c = await start();
+      const held = new Promise((resolve) => {
+        childRequest = resolve;
+      });
+      const rejectedPrompt = assert.rejects(c.prompt("CANCEL_SUB"));
+      await held;
+      // Real Pi, MCP and subagent processes; the model request is held open.
+      const rows = JSON.parse(
+        execFileSync(
+          "powershell.exe",
+          [
+            "-NoProfile",
+            "-Command",
+            "Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId | ConvertTo-Json -Compress",
+          ],
+          { encoding: "utf8" },
+        ),
+      );
+      const pi = rows.find((row) => row.ParentProcessId === c.process.pid);
+      assert.ok(pi, "native Pi child found");
+      const descendants = rows.filter(
+        (row) => row.ParentProcessId === pi.ProcessId,
+      );
+      assert.ok(descendants.length >= 2, "MCP and native subagent are running");
+      const exited = once(c.process, "exit");
+      process.kill(crash === "pi" ? pi.ProcessId : c.process.pid, "SIGKILL");
+      const [[code]] = await Promise.all([exited, rejectedPrompt]);
+      if (crash === "pi")
+        assert.equal(code, 1, "runtime crash fails the connection");
+      children.delete(c.process);
+      // Kernel process waits, not polling/sleep-based assertions.
+      const pids = [pi.ProcessId, ...descendants.map((row) => row.ProcessId)];
+      execFileSync(
+        "powershell.exe",
+        [
+          "-NoProfile",
+          "-Command",
+          `
+        $ErrorActionPreference = 'Stop'
+        foreach ($processId in @(${pids.join(",")})) {
+          $owned = Get-Process -Id $processId -ErrorAction SilentlyContinue
+          if ($owned -and !$owned.WaitForExit(5000)) {
+            $owned.Kill()
+            throw "Descendant survived adapter exit: $processId"
+          }
+        }
+      `,
+        ],
+        { stdio: "pipe" },
+      );
+      releaseChild.destroy();
+      console.log(`PASS ${crash} crash cleans native descendants`);
+    }
+  }
   await assert.rejects(access(marker));
   const rejected = spawn(
     process.execPath,

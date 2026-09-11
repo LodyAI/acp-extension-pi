@@ -37,6 +37,11 @@ workspace packages or reimplement Pi's executor.
   and cancellation results. Pi stats own usage and context occupancy.
 - stdout is protocol only; diagnostics go to stderr. Close the owned process tree
   when ACP closes. Subagents stay in the Pi process group for forced cleanup.
+- On Windows the executable joins its own kill-on-close Job before spawning Pi.
+  The adapter alone holds its handle; process exit kills remaining descendants.
+  Unexpected Pi exit terminates the ACP connection with a nonzero adapter exit.
+  Ship CI-built Node-API binaries for Windows x64/ARM64; no user-side compilation
+  or taskkill fallback when the native module cannot load or join the Job.
 - MCP names use the reserved mcp_ prefix and must be unique after normalization.
   Support text/image results; reject other content types instead of stringifying
   them. Preserve error flags and cancellation. Configuration secrets stay

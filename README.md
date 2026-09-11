@@ -75,6 +75,12 @@ cancels outstanding questions, clears queues, aborts Pi, and waits for request
 cleanup. A transport failure fails the request. Connection close terminates the
 owned process group, including non-detached child agents.
 
+On Windows, the adapter joins a Windows Job before starting Pi. Adapter exit
+releases the Job and terminates remaining descendants, including MCP servers.
+Unexpected Pi exit ends the connection with a nonzero adapter exit code; native
+session files remain available for explicit resume through a new connection.
+This adds no worker process. Missing or unusable native support fails startup.
+
 Ordinary diagnostics do not replace the model's terminal outcome. Session file
 changes cannot silently retarget ACP identity. No extension may enqueue work
 after its tool returns or replace the parent session.
@@ -87,6 +93,11 @@ hot reload, handoff/session-navigation plugins, permission/environment plugins,
 terminal UI adaptation, background child jobs or recursive subagent tools.
 
 ## Validation
+
+Windows source development requires `pnpm build:native` with the Visual C++
+toolchain and Python available. Published packages carry CI-built Node-API
+modules for Windows x64 and ARM64; end users do not compile them. The Check
+workflow assembles the distributable tarball only after both Windows jobs pass.
 
 ```sh
 pnpm check

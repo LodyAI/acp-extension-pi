@@ -19,17 +19,17 @@ import { MCP_CONFIG_ENV } from "./mcp.js";
 
 const SHUTDOWN_GRACE_MS = 1_000;
 
-function waitForExit(child: ChildProcess): Promise<boolean> {
+function waitForExit(child: ChildProcess): Promise<void> {
   if (child.exitCode !== null || child.signalCode !== null)
-    return Promise.resolve(true);
+    return Promise.resolve();
   return new Promise((resolve) => {
     const timeout = setTimeout(() => {
       child.off("exit", exited);
-      resolve(false);
+      resolve();
     }, SHUTDOWN_GRACE_MS);
     const exited = () => {
       clearTimeout(timeout);
-      resolve(true);
+      resolve();
     };
     child.once("exit", exited);
   });
@@ -56,6 +56,10 @@ export function serve(stream: Stream, piArgs: string[] = []) {
   let cwd: string | undefined;
   let closing: Promise<void> | undefined;
   let configDirectory: string | undefined;
+  let resolveClosed!: () => void;
+  const closed = new Promise<void>((resolve) => {
+    resolveClosed = resolve;
+  });
   const close = (): Promise<void> => {
     if (closing) return closing;
     closing = (async () => {
@@ -72,32 +76,23 @@ export function serve(stream: Stream, piArgs: string[] = []) {
             /* Already exited. */
           }
         }
-        const exited = await waitForExit(owned);
-        if (exited && process.platform === "win32") return;
-        if (process.platform === "win32") {
-          await new Promise<void>((resolve) => {
-            const killer = spawn(
-              "taskkill",
-              ["/pid", String(owned.pid), "/T", "/F"],
-              { stdio: "ignore" },
-            );
-            killer.once("error", () => {
-              owned.kill();
-              resolve();
-            });
-            killer.once("exit", () => resolve());
-          });
-        } else {
+        await waitForExit(owned);
+        if (process.platform !== "win32") {
           try {
             process.kill(-owned.pid, "SIGKILL");
           } catch {
             /* Already exited. */
           }
+          await waitForExit(owned);
         }
-        await waitForExit(owned);
       } finally {
-        if (configDirectory)
-          rmSync(configDirectory, { recursive: true, force: true });
+        try {
+          if (configDirectory)
+            rmSync(configDirectory, { recursive: true, force: true });
+        } finally {
+          // The executable exits, releasing its Windows Job and all descendants.
+          resolveClosed();
+        }
       }
     })();
     return closing;
@@ -146,7 +141,14 @@ export function serve(stream: Stream, piArgs: string[] = []) {
           detached: process.platform !== "win32",
         },
       );
-      child.once("exit", () => void close());
+      child.once("exit", () => {
+        if (!closing) process.exitCode = 1;
+        void close();
+      });
+      child.once("error", () => {
+        process.exitCode = 1;
+        void close();
+      });
       child.stderr!.pipe(process.stderr, { end: false });
       const pi = new PiRpcConnection(
         {
@@ -223,5 +225,5 @@ export function serve(stream: Stream, piArgs: string[] = []) {
   connection.signal.addEventListener("abort", () => void close(), {
     once: true,
   });
-  return { connection, close };
+  return { connection, close, closed };
 }
