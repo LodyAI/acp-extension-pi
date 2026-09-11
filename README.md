@@ -35,10 +35,14 @@ This restriction is not a security sandbox for shell commands.
 - Native file identity for explicit new/resume. No history replay or session-id map.
 - Acknowledged steering using acp-extension-core identity metadata.
 - Native usage/context snapshots, automatic compaction activity and /compact.
-- ACP-selected stdio MCP tools, including rich results and cancellation.
+- ACP-selected stdio MCP tools with text/image results and cancellation.
 - Questionnaire: one or more questions in Lody's existing question card.
 - Todo: list/add/toggle/clear through Lody's existing checklist.
 - Subagent: native Lody task lifecycle, list, output and individual cancellation.
+
+MCP audio, resource links and embedded resources are unsupported: a result containing
+any of these fails explicitly, including mixed results. Structured JSON output is
+appended as text. This validates returned content; it cannot undo an MCP tool's effects.
 
 Questionnaire waits inside the parent tool call and returns answers or cancellation.
 Late answers are ignored. Child agents do not ask questions; they report missing

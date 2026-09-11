@@ -65,6 +65,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
             text: `MCP:${process.env.MCP_FIXTURE_TAG}:${request.params.arguments?.value ?? request.params.name}`,
           },
         ];
+  if (request.params.arguments?.value === "unsupported-resource")
+    content.push({
+      type: "resource_link",
+      uri: "file:///synthetic.txt",
+      name: "synthetic",
+    });
   return {
     content,
     isError: request.params.name === "error",

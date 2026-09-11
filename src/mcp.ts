@@ -27,7 +27,7 @@ export async function registerMcpTools(pi: ExtensionAPI): Promise<void> {
     await Promise.allSettled(clients.map((client) => client.close()));
   };
   pi.on("session_shutdown", close);
-  // Pi's tool result hook preserves both the MCP error flag and rich content.
+  // Pi's tool result hook preserves the MCP error flag.
   pi.on("tool_result", (event) => {
     if (
       tools.has(event.toolName) &&
@@ -80,11 +80,13 @@ export async function registerMcpTools(pi: ExtensionAPI): Promise<void> {
                 CallToolResultSchema,
                 { signal },
               )) as CallToolResult;
-              const content = result.content.map((block) =>
-                block.type === "text" || block.type === "image"
-                  ? block
-                  : { type: "text" as const, text: JSON.stringify(block) },
-              );
+              const content = result.content.map((block) => {
+                if (block.type !== "text" && block.type !== "image")
+                  throw new Error(
+                    `Unsupported MCP content type: ${block.type}. Pi V1 supports text and images only.`,
+                  );
+                return block;
+              });
               if (result.structuredContent)
                 content.push({
                   type: "text",

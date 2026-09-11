@@ -61,6 +61,9 @@ const server = createServer(async (request, response) => {
     if (content.includes("MCP_TEST"))
       tool = ["mcp_fixture_echo", { value: "native-mcp" }];
     if (content.includes("MCP_ERROR")) tool = ["mcp_fixture_error", {}];
+    if (content.includes("MCP_IMAGE")) tool = ["mcp_fixture_image", {}];
+    if (content.includes("MCP_RESOURCE"))
+      tool = ["mcp_fixture_echo", { value: "unsupported-resource" }];
     if (content.includes("SUB_TEST"))
       tool = [
         "subagent",
@@ -205,6 +208,31 @@ try {
       (update) =>
         update.title === "mcp_fixture_error" && update.status === "failed",
     ),
+  );
+  await a.prompt("MCP_IMAGE");
+  assert.ok(
+    updates.some(
+      (update) =>
+        update.title === "mcp_fixture_image" &&
+        update.status === "completed" &&
+        update.content?.some(
+          (block) => block.type === "content" && block.content.type === "image",
+        ),
+    ),
+  );
+  const beforeUnsupported = updates.length;
+  await a.prompt("MCP_RESOURCE");
+  assert.ok(
+    updates
+      .slice(beforeUnsupported)
+      .some(
+        (update) =>
+          update.title === "mcp_fixture_echo" &&
+          update.status === "failed" &&
+          JSON.stringify(update.content).includes(
+            "Unsupported MCP content type: resource_link",
+          ),
+      ),
   );
   assert.equal((await a.prompt("ASK_TEST")).stopReason, "end_turn");
   assert.ok(

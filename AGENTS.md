@@ -38,7 +38,8 @@ workspace packages or reimplement Pi's executor.
 - stdout is protocol only; diagnostics go to stderr. Close the owned process tree
   when ACP closes. Subagents stay in the Pi process group for forced cleanup.
 - MCP names use the reserved mcp_ prefix and must be unique after normalization.
-  Preserve rich results, error flags and cancellation. Configuration secrets stay
+  Support text/image results; reject other content types instead of stringifying
+  them. Preserve error flags and cancellation. Configuration secrets stay
   in private temporary files, never native history.
 - Use acp-extension-core contracts. Advertise only implemented capabilities.
   No permission modes, arbitrary plugin compatibility, TUI, Plan Mode, runtime
