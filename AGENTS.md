@@ -35,8 +35,13 @@ workspace packages or reimplement Pi's executor.
   applied notification before later output; Lody owns its application barrier.
 - Keep diagnostics separate from model outcomes. Preserve native error, length
   and cancellation results. Pi stats own usage and context occupancy.
-- stdout is protocol only; diagnostics go to stderr. Close the owned process tree
-  when ACP closes. Subagents stay in the Pi process group for forced cleanup.
+- stdout is protocol only; diagnostics go to stderr. On Unix, normal connection
+  close requests Pi cleanup and terminates its process group; subagents remain
+  in that group. V1 accepts that detached shell commands may survive a Pi hard
+  crash and require manual termination. Do not add a watchdog or replace Pi's
+  shell executor to provide hard-crash containment. Preserve normal Stop/close
+  cleanup and fail the ACP connection on unexpected Pi exit; never report success
+  or automatically retry. Explicit resume does not reclaim orphaned commands.
 - On Windows the executable joins its own kill-on-close Job before spawning Pi.
   The adapter alone holds its handle; process exit kills remaining descendants.
   Unexpected Pi exit terminates the ACP connection with a nonzero adapter exit.

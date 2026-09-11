@@ -75,6 +75,15 @@ cancels outstanding questions, clears queues, aborts Pi, and waits for request
 cleanup. A transport failure fails the request. Connection close terminates the
 owned process group, including non-detached child agents.
 
+On Unix, V1 relies on Pi's cooperative cleanup of its detached shell commands.
+If Pi is forcibly killed or crashes before that cleanup runs, commands in separate
+process groups can survive the adapter and continue writing files or running
+services. They may require manual termination. This is an accepted V1 limitation:
+there is no additional watchdog or replacement shell executor. Normal Stop and
+connection-close cleanup remain supported. Unexpected Pi exit fails the connection
+with a nonzero adapter exit code; it never reports success or retries the prompt.
+Resume requires an explicit new connection and does not clean up orphaned commands.
+
 On Windows, the adapter joins a Windows Job before starting Pi. Adapter exit
 releases the Job and terminates remaining descendants, including MCP servers.
 Unexpected Pi exit ends the connection with a nonzero adapter exit code; native
