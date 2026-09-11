@@ -11,6 +11,7 @@ import {
 import type { AgentConnection, PiStream } from "./types.js";
 import { PiTransport } from "./transport.js";
 import { PI_RPC_VERSION } from "./version.js";
+import { QUESTION_PREFIX, questionsSchema } from "./builtin-tools.js";
 
 const modelSchema = z.object({
   provider: z.string(),
@@ -96,6 +97,8 @@ type Run = Progress &
   ReturnType<typeof deferred<acp.PromptResponse>> & {
     finished: ReturnType<typeof deferred<void>>;
     cancellation?: Promise<void>;
+    settled: ReturnType<typeof deferred<void>>;
+    accepted?: Promise<unknown>;
   };
 type Host = {
   configureMcp: (servers: acp.McpServer[]) => Promise<void>;
@@ -113,9 +116,13 @@ export class PiRpcConnection implements AgentConnection {
   private sessionId = "";
   private cwd = "";
   private active?: Run;
-  private background?: Progress;
   private configuring = false;
   private readonly questions = new Map<string, () => Promise<void>>();
+  private readonly controls = new Map<
+    string,
+    ReturnType<typeof deferred<unknown>>
+  >();
+  private pendingPlan?: acp.PlanEntry[];
   private steerCommand = "";
   private pendingSteer?: {
     id: string;
@@ -133,6 +140,9 @@ export class PiRpcConnection implements AgentConnection {
       (error) => {
         this.questions.clear();
         this.active?.reject(error);
+        this.active?.settled.reject(error);
+        for (const request of this.controls.values()) request.reject(error);
+        this.controls.clear();
         this.pendingSteer?.applied.reject(error);
       },
     );
@@ -207,6 +217,11 @@ export class PiRpcConnection implements AgentConnection {
     if (!state.sessionFile)
       throw new Error("Pi did not provide a persistent session file");
     this.sessionId = state.sessionFile;
+    await this.rpc.drain();
+    if (this.pendingPlan) {
+      await this.update({ sessionUpdate: "plan", entries: this.pendingPlan });
+      this.pendingPlan = undefined;
+    }
     const configOptions = await this.configOptions();
     await this.reportUsage();
     return { sessionId: this.sessionId, configOptions };
@@ -305,6 +320,10 @@ export class PiRpcConnection implements AgentConnection {
     this.assertSession(request.sessionId);
     this.assertIdle();
     const { message, images } = this.promptContent(request.prompt);
+    if (message.startsWith(`/${this.steerCommand}`))
+      throw new Error(
+        "Internal Pi control commands cannot be submitted as user prompts",
+      );
     const run: Run = {
       ...deferred<acp.PromptResponse>(),
       activities: new Map(),
@@ -313,6 +332,7 @@ export class PiRpcConnection implements AgentConnection {
       modelSettled: false,
       completed: false,
       cancelled: false,
+      settled: deferred<void>(),
     };
     this.active = run;
     try {
@@ -344,13 +364,16 @@ export class PiRpcConnection implements AgentConnection {
         }
         responseText = "Context compacted.";
       } else {
-        await this.rpc.request("prompt", {
+        run.accepted = this.rpc.request("prompt", {
           message,
           ...(images.length ? { images } : {}),
         });
+        await run.accepted;
+        // Only the packaged tools are loaded. They complete inside Pi's native
+        // tool await; no extension can start detached work after settlement.
+        await run.settled.promise;
       }
-      // The SDK worker responds only after all accepted native calls drain.
-      // Drain their output before closing question/admission lifetime.
+      // Execution and output delivery are separate barriers.
       await this.rpc.drain();
       this.assertReady();
       run.completed = true;
@@ -421,20 +444,19 @@ export class PiRpcConnection implements AgentConnection {
   cancel: AgentConnection["cancel"] = async (request) => {
     this.assertSession(request.sessionId);
     const run = this.active;
-    if (!run) {
-      if (this.background) {
-        this.background.cancelled = true;
-        await this.abort();
-      }
-      return;
-    }
+    if (!run) return;
     run.cancelled = true;
     await this.cancelRun(run);
     await run.finished.promise;
   };
 
   private cancelRun(run: Run): Promise<void> {
-    run.cancellation ??= this.abort();
+    // Native abort cannot cancel a model run that has not passed preflight yet.
+    // Our packaged tools never ask questions or dispatch work during preflight.
+    run.cancellation ??= (async () => {
+      await run.accepted?.catch(() => undefined);
+      await this.abort();
+    })();
     return run.cancellation;
   }
 
@@ -541,14 +563,55 @@ export class PiRpcConnection implements AgentConnection {
       typeof event.message === "string" &&
       event.message.startsWith("lody-rpc:")
     ) {
+      const payload = z
+        .object({ type: z.string() })
+        .passthrough()
+        .parse(JSON.parse(event.message.slice("lody-rpc:".length)));
+      if (payload.type === "lody_control") {
+        const response = this.controls.get(String(payload.id));
+        if (payload.error) response?.reject(new Error(String(payload.error)));
+        else response?.resolve(payload.data);
+        return;
+      }
+      if (payload.type === "lody_todos") {
+        const { todos } = z
+          .object({
+            todos: z.array(z.object({ text: z.string(), done: z.boolean() })),
+          })
+          .parse(payload);
+        const entries: acp.PlanEntry[] = todos.map((todo) => ({
+          content: todo.text,
+          priority: "medium",
+          status: todo.done ? "completed" : "pending",
+        }));
+        if (!this.sessionId) this.pendingPlan = entries;
+        else await this.update({ sessionUpdate: "plan", entries });
+        return;
+      }
+      if (payload.type === "lody_subagent") {
+        const task = z
+          .object({
+            taskId: z.string(),
+            status: z.enum(["in_progress", "completed", "failed"]),
+            description: z.string(),
+          })
+          .passthrough()
+          .parse(payload.task);
+        await this.update({
+          sessionUpdate: "tool_call_update",
+          toolCallId: task.taskId,
+          title: task.description,
+          status: task.status,
+          _meta: { lody: { task } },
+        });
+        return;
+      }
       event = z
         .object({
           type: z.enum([
             "lody_steer_ready",
             "lody_steer_refused",
             "lody_not_ready",
-            "lody_background_start",
-            "lody_background_end",
           ]),
           version: z.number().optional(),
           steerId: z.string().optional(),
@@ -556,27 +619,6 @@ export class PiRpcConnection implements AgentConnection {
           sessionFile: z.string().optional(),
         })
         .parse(JSON.parse(event.message.slice("lody-rpc:".length)));
-    }
-    if (event.type === "lody_background_start") {
-      this.background = {
-        activities: new Map(),
-        started: false,
-        modelSettled: false,
-        completed: false,
-        cancelled: false,
-      };
-      return;
-    }
-    if (event.type === "lody_background_end") {
-      const progress = this.background;
-      if (progress) {
-        progress.completed = true;
-        for (const key of progress.activities.keys())
-          await this.endActivity(progress, key);
-        await this.cancelQuestions();
-        this.background = undefined;
-      }
-      return;
     }
     if (event.type === "lody_steer_ready") {
       // Lifecycle events precede any output from the replacement runtime.
@@ -655,7 +697,7 @@ export class PiRpcConnection implements AgentConnection {
       }
       return;
     }
-    const run = this.background ?? this.active;
+    const run = this.active;
     if (event.type === "extension_error" && (!run || run.completed)) {
       process.stderr.write(`Pi extension diagnostic: ${String(event.error)}\n`);
       return;
@@ -668,6 +710,7 @@ export class PiRpcConnection implements AgentConnection {
         break;
       case "agent_settled":
         run.modelSettled = true;
+        run.settled.resolve();
         break;
       case "message_start": {
         const message = z
@@ -994,7 +1037,7 @@ export class PiRpcConnection implements AgentConnection {
   ): Promise<void> {
     if (!["select", "confirm", "input", "editor"].includes(request.method))
       return;
-    const run = this.background ?? this.active;
+    const run = this.active;
     const cancel = () =>
       this.rpc.send({
         type: "extension_ui_response",
@@ -1021,6 +1064,89 @@ export class PiRpcConnection implements AgentConnection {
     };
     this.questions.set(request.id, () => respond({ cancelled: true }));
     try {
+      if (
+        request.method === "input" &&
+        request.title?.startsWith(QUESTION_PREFIX)
+      ) {
+        const form = z
+          .object({ toolCallId: z.string(), questions: questionsSchema })
+          .parse(JSON.parse(request.title.slice(QUESTION_PREFIX.length)));
+        const properties: Extract<
+          acp.CreateElicitationRequest,
+          { mode?: "form" }
+        >["requestedSchema"]["properties"] = {};
+        for (const [index, question] of form.questions.entries()) {
+          const key = `q${index}`;
+          properties[key] = {
+            type: "string",
+            title: question.header,
+            description: question.question,
+            ...(question.options.length
+              ? {
+                  oneOf: question.options.map((option) => ({
+                    const: option.label,
+                    title: option.label,
+                    ...(option.description
+                      ? { description: option.description }
+                      : {}),
+                  })),
+                }
+              : {}),
+          };
+          if (question.options.length && question.allowCustomAnswer)
+            properties[`${key}_custom`] = {
+              type: "string",
+              _meta: {
+                lody: { elicitation: { version: 1, customAnswerFor: key } },
+              },
+            };
+        }
+        const response = await this.host.question({
+          mode: "form",
+          sessionId: this.sessionId,
+          toolCallId: form.toolCallId,
+          message:
+            form.questions.length === 1
+              ? form.questions[0].question
+              : "Pi needs your input",
+          requestedSchema: { type: "object", properties },
+          _meta: {
+            lody: {
+              elicitation: { version: 1, autoResolveAfterSeconds: null },
+            },
+          },
+        });
+        if (
+          this.active !== run ||
+          run.cancelled ||
+          run.completed ||
+          response.action !== "accept"
+        )
+          return respond({ cancelled: true });
+        const content = z
+          .record(z.string(), z.unknown())
+          .parse(response.content);
+        const answers: Record<string, string> = {};
+        for (const [index, question] of form.questions.entries()) {
+          const custom = content[`q${index}_custom`];
+          const value =
+            question.allowCustomAnswer &&
+            typeof custom === "string" &&
+            custom.trim()
+              ? custom
+              : content[`q${index}`];
+          if (
+            typeof value !== "string" ||
+            !value.trim() ||
+            (!question.allowCustomAnswer &&
+              question.options.length &&
+              !question.options.some((option) => option.label === value))
+          )
+            return respond({ cancelled: true });
+          answers[question.id] = value;
+        }
+        return respond({ value: JSON.stringify(answers) });
+      }
       const response = await this.host.question({
         mode: "form",
         sessionId: this.sessionId,
@@ -1060,7 +1186,7 @@ export class PiRpcConnection implements AgentConnection {
         },
       });
       if (
-        (this.active !== run && this.background !== run) ||
+        this.active !== run ||
         run.cancelled ||
         run.completed ||
         response.action !== "accept"
@@ -1128,6 +1254,39 @@ export class PiRpcConnection implements AgentConnection {
     method: string,
     params?: unknown,
   ): Promise<T> => {
+    const operation =
+      method === LODY_EXTENSION_METHODS.subagentsList
+        ? "list"
+        : method === LODY_EXTENSION_METHODS.subagentsCancel
+          ? "cancel"
+          : method === LODY_EXTENSION_METHODS.subagentsOutput
+            ? "output"
+            : undefined;
+    if (operation) {
+      const input = z
+        .object({
+          sessionId: z.string(),
+          taskId: z.string().optional(),
+          activeOnly: z.boolean().optional(),
+          tail: z.number().int().positive().optional(),
+        })
+        .parse(params);
+      this.assertSession(input.sessionId);
+      this.assertReady();
+      const id = randomUUID();
+      const response = deferred<unknown>();
+      this.controls.set(id, response);
+      try {
+        await this.rpc.request("prompt", {
+          message:
+            `/${this.steerCommand} ` +
+            JSON.stringify({ ...input, op: operation, id }),
+        });
+        return (await response.promise) as T;
+      } finally {
+        this.controls.delete(id);
+      }
+    }
     if (method !== LODY_EXTENSION_METHODS.sessionSteer)
       throw new Error("Pi does not implement this ACP extension");
     const request = z
@@ -1204,6 +1363,13 @@ export function initializeResponse(): acp.InitializeResponse {
         lody: {
           usage: { version: 1 },
           compaction: { version: 1 },
+          subagents: {
+            version: 1,
+            lifecycle: true,
+            list: true,
+            cancel: true,
+            output: true,
+          },
           steering: {
             version: 1,
             transport: "request",

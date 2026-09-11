@@ -1,67 +1,52 @@
 # acp-extension-pi
 
-Standalone public ACP adapter for Pi. Lody consumes its executable; do not import
-Lody workspace packages or fork its session executor here.
+Standalone public ACP adapter. Lody consumes its executable; never import Lody
+workspace packages or reimplement Pi's executor.
 
-- Pi owns tools, execution and native session files. Store the native file path as
-  ACP session identity; never replay Lody history or add a session-id map.
-- `package.json` pins the runtime. Keep `src/version.ts` aligned when upgrading and
-  verify the upstream RPC lifecycle before changing the pin.
-- The owned SDK worker replies only after the native prompt and all accepted
-  extension calls finish. Native preflight ACK and `agent_settled` are not completion.
-  Abort clears queues first and retains ownership through native cleanup.
-  Cancel and admission after cancellation/settlement wait for the same run cleanup,
-  including usage reporting and any abort still in flight.
-- Steering is applied only on the matching custom-message metadata, never by text.
-  Send the Core applied notification before later session updates. The ACP client
-  owns its output/application barrier. Preserve provable idle refusal for requeue.
-- Session replacement and model/configuration changes exclude concurrent prompts
-  and other configuration operations. Clear native identity before replacement and
-  on replacement failure; never allow an old or empty id to address the new file.
-  Pi extension-driven new/fork/switch must invalidate the ACP binding, never silently
-  follow the new file. Reload readiness belongs to the loaded extension runtime;
-  shutdown invalidates it even when the native file stays the same.
-  Native tree navigation is unsupported: cancel it before it changes the branch
-  inside an otherwise unchanged session file.
-- stdout is exclusively ACP. Diagnostics belong on stderr. Close the owned Pi
-  process tree when the ACP transport closes; never silently retry a prompt.
-- Explicitly visible custom messages and UI notifications use ACP output; hidden
-  custom context and internal steering payloads must not become duplicate chat.
-- Ordinary Pi extension errors are notices, not model failures. Preserve failed
-  input commands when Pi reports them as handled without starting a model run;
-  callback diagnostics must not overwrite the assistant's terminal outcome.
-  Preserve final token-limit termination and accepted cancellation on every prompt path.
-  Settle those outcomes in one place. Ordinary post-turn configuration refresh failure
-  is diagnostic; native identity, transport and cleanup failures must not be hidden.
-  Optional query fallbacks check the transport's own failure state, including
-  session setup where there is no active prompt to reject on disconnection.
-  Command ACK and model settlement do not finish extension-triggered compaction.
-  `Operations` owns native call lifetimes; do not add a second event/state finisher.
-  Events and state queries only report progress and configuration. A detached call
-  after successful completion starts background work and holds subsequent admission.
-  Cancelled ancestry cannot restart work; preflight and late-created compaction
-  must inherit Stop before they can start provider work.
-- MCP uses standard ACP stdio configuration; reject unsupported transports before
-  starting Pi. Pi's extension owns MCP clients/tools and native cancellation.
-  Write runtime configuration only under the existing session/config exclusion;
-  new/resumed sessions must observe fresh extension readiness before accepting input.
-  Keep configuration secrets in private temporary files, never native history.
-  Check MCP names against Pi's effective tool owners, including dynamic registration.
-  Internal steer commands use a fresh invocation name per loaded extension runtime.
-- Advertise only implemented capabilities. Permission modes, native history import
-  and TUI replacement are not implemented.
-- Use shared `acp-extension-core` contracts, not copied protocol definitions.
-- Pi session stats own cumulative usage and context occupancy, including compaction.
-  Refresh context snapshots at assistant-message boundaries and settlement; do not
-  derive another context estimate from provider message usage or a cached model.
-  Do not infer model
-  attribution for summary/tool charges or turn unknown context occupancy into zero.
-  Activity notifications describe Pi operations; they never own run completion.
-- Tests use synthetic inputs and explicit signals; no sleeps or commercial models
-  in CI. Never commit credentials, real transcripts or temporary validation data.
+- Launch the pinned official Pi CLI in RPC mode. There is no custom SDK worker,
+  AgentSession facade, generic call owner or background execution scheduler.
+- Disable extension discovery and refuse external extension startup arguments.
+  Only the packaged extension is loaded. Child Pi processes disable discovery too.
+  This is a supported-feature boundary, not a sandbox against arbitrary bash.
+- Packaged tools are questionnaire, todo, subagent and ACP-selected stdio MCP
+  tools. Their execute promises own all work. No detached callbacks, hot reload,
+  extension-driven session replacement or custom compaction.
+- Only the main agent asks questions. Questionnaire handles one or many questions
+  through Lody form elicitation. Stop closes questions; late answers cannot enter
+  another request. Do not implement terminal UI.
+- Todo snapshots live in Pi tool results. Reconstruct on native resume and publish
+  ACP checklist updates to Lody; never create another todo store or bidirectional sync.
+- Subagent execution owns task ids, status, output and child cancellation. Lody
+  receives Core task metadata and list/output/cancel methods. Parent tools await
+  child exit; child agents have built-in Pi tools, no questionnaire or subagent
+  extension. They inherit model, thinking and cwd, not the parent's MCP clients.
+  Process-local task queries do not resume or replay a terminated child.
+- Ordinary prompt ACK means preflight passed, not completion. With only these
+  packaged tools, agent_settled terminates native model work including retries and
+  automatic compaction. Explicit compact waits for its own RPC response. Both
+  drain output and finish cleanup before admitting another request.
+- Abort must not overtake prompt preflight. Clear queues, cancel questions, await
+  native abort and the same request cleanup. Transport failure is failure, never
+  successful settlement. Never silently retry a prompt.
+- Pi owns native session files. ACP identity is the native file path. Explicit
+  new/resume and configuration exclude execution. Never silently follow another
+  file or branch. Do not replay Lody history or add an identity map.
+- Steering uses native custom-message metadata, never matching text. Emit the Core
+  applied notification before later output; Lody owns its application barrier.
+- Keep diagnostics separate from model outcomes. Preserve native error, length
+  and cancellation results. Pi stats own usage and context occupancy.
+- stdout is protocol only; diagnostics go to stderr. Close the owned process tree
+  when ACP closes. Subagents stay in the Pi process group for forced cleanup.
+- MCP names use the reserved mcp_ prefix and must be unique after normalization.
+  Preserve rich results, error flags and cancellation. Configuration secrets stay
+  in private temporary files, never native history.
+- Use acp-extension-core contracts. Advertise only implemented capabilities.
+  No permission modes, arbitrary plugin compatibility, TUI, Plan Mode, runtime
+  preset/tools plugins, detached subagent jobs or native history import in V1.
+- Tests use synthetic inputs and explicit signals, no real sleeps or commercial
+  providers. Unit tests protect wire contracts; smoke drives the official CLI
+  through a local deterministic model endpoint without injecting a provider plugin.
 
-Implementation changes go through a Draft PR. Do not push implementation directly
-to the default branch without an explicit request to bypass PR review.
-
-Run `pnpm install`, `pnpm check`, `pnpm build`, and `pnpm smoke` before committing.
-Keep the adaptation small and remove duplicate or implementation-only tests.
+Implementation changes use a Draft PR. Before committing run pnpm check,
+pnpm build and pnpm smoke. Verify installed tarball behavior for packaging changes.
+Remove replaced production paths and their implementation-only tests together.

@@ -37,6 +37,19 @@ function waitForExit(child: ChildProcess): Promise<boolean> {
 
 /** One runtime per ACP connection; Pi owns its native files and tool processes. */
 export function serve(stream: Stream, piArgs: string[] = []) {
+  // Never forward extension/resource control flags to the native process.
+  const valueFlags = new Set(["--provider", "--model", "--thinking"]);
+  for (let i = 0; i < piArgs.length; i++) {
+    if (
+      !valueFlags.has(piArgs[i]) ||
+      !piArgs[i + 1] ||
+      piArgs[i + 1].startsWith("-")
+    )
+      throw new Error(
+        "Pi V1 accepts only --provider, --model and --thinking; external extensions are unsupported",
+      );
+    i++;
+  }
   let child: ChildProcess | undefined;
   let runtime: Promise<PiRpcConnection> | undefined;
   let current: PiRpcConnection | undefined;
@@ -109,13 +122,30 @@ export function serve(stream: Stream, piArgs: string[] = []) {
       configDirectory = mkdtempSync(join(tmpdir(), "lody-pi-mcp-"));
       const configPath = join(configDirectory, "servers.json");
       writeFileSync(configPath, "[]", { mode: 0o600 });
-      const entry = fileURLToPath(new URL("./worker.js", import.meta.url));
-      child = spawn(process.execPath, [entry, ...piArgs], {
-        cwd,
-        env: { ...process.env, [MCP_CONFIG_ENV]: configPath },
-        stdio: ["pipe", "pipe", "pipe"],
-        detached: process.platform !== "win32",
-      });
+      const entry = fileURLToPath(
+        new URL(
+          "./bundle/cli.js",
+          import.meta.resolve("@earendil-works/pi-coding-agent"),
+        ),
+      );
+      child = spawn(
+        process.execPath,
+        [
+          entry,
+          ...piArgs,
+          "--mode",
+          "rpc",
+          "--no-extensions",
+          "-e",
+          fileURLToPath(new URL("./extension.js", import.meta.url)),
+        ],
+        {
+          cwd,
+          env: { ...process.env, [MCP_CONFIG_ENV]: configPath },
+          stdio: ["pipe", "pipe", "pipe"],
+          detached: process.platform !== "win32",
+        },
+      );
       child.once("exit", () => void close());
       child.stderr!.pipe(process.stderr, { end: false });
       const pi = new PiRpcConnection(

@@ -1,239 +1,102 @@
-# acp-extension-pi
+# Pi ACP adapter
 
-Lody-owned ACP adapter for Pi's native SDK runtime. This repository continues the
-working prototype in [Lody PR #464](https://github.com/LodyAI/Lody/pull/464), following
-the maintainer's recommendation to maintain Pi alongside the builtin adapters.
-[Lody Issue #451](https://github.com/LodyAI/Lody/issues/451) tracks product integration.
+A Lody-owned ACP adapter for the pinned official Pi CLI (0.85.1).
 
 ```text
-Lody / ACP client -> ACP stdio -> adapter -> owned SDK worker -> native AgentSession
-                                               |
-                                               + bundled and user Pi extensions
+Lody → ACP Adapter → official Pi CLI --mode rpc
+                         └─ packaged tools
 ```
 
-The adapter uses the shared `acp-extension-core` contract and pinned
-`@earendil-works/pi-coding-agent@0.85.1`. It does not depend on the Lody workspace.
-Pi owns model execution, tools and native session files. ACP session ids are those
-file paths; resume switches to the same file without replay or a second id map.
-One ACP connection owns one Pi process and working directory. Session replacement
-and configuration exclude concurrent prompts; a failed replacement invalidates the
-old identity. Clients must create or resume a session before sending further input.
+The adapter translates protocols. Pi owns model execution, native tools,
+automatic compaction, retry and session files. There is no custom SDK worker.
 
-## Run from source
+## Run
 
-Requires Node.js 22.19+ and pnpm 10.20.0:
+Requires Node.js 22.19 or newer.
 
 ```sh
-pnpm install --frozen-lockfile
+pnpm install
 pnpm build
-node dist/index.js
+node dist/index.js --provider <provider> --model <model>
 ```
 
-Configure an ACP client to launch `node` with the absolute path to `dist/index.js`.
-The worker accepts Pi's provider/model/thinking, tool/resource selection, system
-prompt, extension flags, project trust, offline and session-directory arguments,
-for example `--provider commandcode --model deepseek/deepseek-v4-flash`.
-ACP owns session selection; terminal startup messages and interactive CLI commands
-are not worker startup inputs. The worker uses Pi's native JSONL/UI transport and
-adds its bundled steering extension. Pi starts in the `session/new` or `session/resume` working
-directory, not the ACP client's launch directory. stdout carries only ACP.
+Startup accepts only --provider, --model and --thinking. Authenticate/configure
+models through Pi on the execution machine. ACP configuration also exposes model
+and thinking selection. stdout is ACP; stderr contains diagnostics.
 
-Pi reads its own credentials/settings on the execution machine. Authenticate with
-Pi's terminal `/login`, or supply the provider's environment variables.
-`PI_CODING_AGENT_DIR` selects an alternate profile. Credentials are not copied into
-session metadata. Pi tools execute with Pi's native filesystem/process access;
-extension questions are interactive input, not permission approval or sandboxing.
+External extensions are not supported. The adapter disables automatic discovery
+and refuses user-supplied extension flags. Official example extensions are not
+implicitly supported: only the implementation packaged here is loaded.
+This restriction is not a security sandbox for shell commands.
 
-## Supported behavior
+## V1 capabilities
 
-- Text, thinking, images, file links and embedded text; actual tool status/output.
-- Dynamic model and thinking configuration, including startup values from Core's
-  `_meta.lody.sessionConfig`; model selection precedes thinking configuration.
-- Ordinary turns, cancellation, handled input commands, failures and native resume.
-- Acknowledged steering through Core's request contract. A small in-process Pi
-  extension queues a custom message with `details.steerId`. Only the matching
-  `message_start` emits the Core applied notification. Repeated text is not identity.
-  Idle/pre-start refusal lets the client keep input in its ordinary queue.
-- `/stats`, `/compact [instructions]`, context usage and cumulative session usage
-  notifications. Manual/automatic compaction and model retries use Core activity
-  metadata; summary retry waits are distinct from the enclosing compaction result.
-- Extension select/confirm/input/editor through ACP elicitation. Late answers cannot
-  apply to a different turn; unsupported/out-of-turn questions are cancelled.
+- Native prompts, text/images, tool progress/results, model errors and cancellation.
+- Native file identity for explicit new/resume. No history replay or session-id map.
+- Acknowledged steering using acp-extension-core identity metadata.
+- Native usage/context snapshots, automatic compaction activity and /compact.
+- ACP-selected stdio MCP tools, including rich results and cancellation.
+- Questionnaire: one or more questions in Lody's existing question card.
+- Todo: list/add/toggle/clear through Lody's existing checklist.
+- Subagent: native Lody task lifecycle, list, output and individual cancellation.
 
-The ACP client must implement the Core steering contract and transfer history
-ownership on the applied notification before consuming later output. Lody already
-provides that barrier. The adapter sends notifications in native event order; ACP
-notification delivery itself is not a remote acknowledgement of UI/history work.
+Questionnaire waits inside the parent tool call and returns answers or cancellation.
+Late answers are ignored. Child agents do not ask questions; they report missing
+information to the parent. Official TUI Question/Questionnaire code is not loaded.
 
-Standard ACP **stdio MCP** servers are supported, including Lody's built-in server
-and selected stdio workspace servers. The bundled Pi extension connects with the
-MCP SDK and registers native tools; Pi owns their execution and cancellation. Tool
-names are `mcp_<server>_<tool>`, with non-identifier characters replaced by `_`;
-collisions and names exceeding 64 characters fail session setup. Discovery includes
-all pages and takes a snapshot at session startup. HTTP/SSE, dynamic tool-list
-updates, resource/prompt discovery, OAuth and MCP sampling/elicitation are not
-implemented. Unsupported transports are rejected, not silently ignored.
+Todo state is persisted in Pi tool results and reconstructed on resume. ACP
+checklist updates are a display projection. There is no second todo database.
+Todo completion maps to pending/completed; the tool does not invent in-progress
+status. The /todos terminal window is not provided.
 
-Text/image results retain their content and MCP errors remain failed tool results.
-Structured results are also provided as JSON text; other returned content blocks
-are represented as JSON text rather than discarded. Cancellation requests do not
-promise rollback of a server's side effects.
+Subagent launches an isolated official Pi child and waits for exit. It inherits
+the parent's model, thinking level and cwd and uses Pi's built-in tools.
+It does not inherit MCP clients or load questionnaire/subagent/user extensions.
+The execution owner generates task ids and supplies Core task metadata; Lody
+presents the native task UI and forwards list/output/cancel requests.
+Output queries retain the last 64 Ki characters for the current runtime.
+Completed child processes are not resumed after adapter restart.
+Child tasks are not detached background jobs or separate Lody sessions.
 
-Each new/resumed session uses that ACP request's server configuration. The adapter
-writes it to a private temporary file under its existing configuration
-exclusion; Pi reloads it with the extension. Setup fails unless the extension is
-ready, including after partial server failure. This file is only a runtime handoff,
-not session identity or durable settings, and normal shutdown removes it. Abrupt
-process termination can leave a private temporary directory containing server env
-values; these are never added to the native transcript or command line.
+## Lifecycle
 
-The SDK worker returns a prompt response only after the native prompt and all
-accepted extension calls finish, including callback-started messages and compaction.
-Pi's preflight ACK, `agent_end`, `agent_settled` and idle snapshots are not request
-completion authorities. One operation owner retains native promises across extension
-callbacks, reload and replacement; Pi still executes every model/tool call and owns
-its queues. Native automatic compaction and retries remain inside the native prompt.
-Detached extension work after successful completion starts background work, forwards
-questions/output and holds admission of the next input. Stop also cancels queued
-input, prevents cancelled preflight from starting a provider, and rejects callbacks
-from cancelled ancestry. It waits for cooperative native cleanup; a plugin that never
-returns can hold Stop until the connection is closed and its worker terminated.
-When a handled input or extension command finishes successfully without starting a
-model run, the adapter emits a neutral Pi notice before returning `end_turn`.
-Visible custom messages and extension notifications are forwarded through ACP.
-Hidden custom context stays hidden; notice severity does not change the model's result.
-Commands and model callbacks can start asynchronous compaction. The adapter waits
-for its native completion before returning or admitting another prompt.
-Cancellation waits for `clear_queue`, `abort` and queued events before classifying
-pending steer delivery. Natural settlement clears unapplied queued steer before
-allowing another prompt. Unanswered extension questions are cancelled before abort.
-Cancel returns after run cleanup; input or session replacement arriving during
-cancellation/settlement waits for that cleanup, including the final usage snapshot.
-EOF fails pending work. Closing the ACP connection lets Pi stop its tracked native
-tool processes before the adapter waits for Pi to exit.
+An ordinary prompt response from Pi acknowledges preflight. The adapter then
+waits for native agent_settled, which covers the supported native model loop and
+awaited tools, retries and automatic compaction. Manual compact instead waits for
+its RPC result. Execution settlement is followed by output delivery and cleanup;
+a new request cannot overtake this barrier.
 
-Permission modes, terminal-history import/discovery, session fork, TUI widgets,
-in-app OAuth and managed artifact publication are not implemented. Existing
-third-party `pi-acp` identities are not automatically migrated.
-Native tree navigation is rejected before changing the active branch, even when
-the session file would stay the same.
-Simultaneous terminal editing of an active native session file is not coordinated.
+Stop does not release admission immediately. It waits for preflight if necessary,
+cancels outstanding questions, clears queues, aborts Pi, and waits for request
+cleanup. A transport failure fails the request. Connection close terminates the
+owned process group, including non-detached child agents.
 
-Usage snapshots come from Pi `get_session_stats`, including native history and
-summary/tool charges. They refresh on new/resume, configuration changes, `/stats`,
-manual compaction (including failure/cancel), and agent settlement. They are
-cumulative snapshots, not deltas. Pi does not attach model provenance to all these
-charges, so the adapter sends an explicit empty `modelUsage` breakdown rather than
-letting the host assign the whole session to the current model. Per-model billing
-is not implemented.
+Ordinary diagnostics do not replace the model's terminal outcome. Session file
+changes cannot silently retarget ACP identity. No extension may enqueue work
+after its tool returns or replace the parent session.
 
-Context occupancy comes only from Pi's session stats, refreshed after each assistant
-message and at settlement, not from per-token provider usage. After compaction,
-Pi reports context occupancy as unknown until a later model
-response. The adapter does not invent a zero or reuse pre-compaction usage as a
-new measurement. Current Lody accepts only numeric occupancy updates, however, so
-its UI retains the previous percentage during this interval. That Host limitation
-is a later display improvement, not a V1 requirement to invent an exact count.
-The current custom-command setup verifies wire snapshots and `/stats`. Full cost
-display must be accepted after Pi's planned managed builtin registration through
-Lody's existing reporting path. Generic custom-agent accounting is outside this
-PR; no change to the Host's builtin admission policy is proposed. Release and
-integration acceptance remain tracked in [Lody #451](https://github.com/LodyAI/Lody/issues/451).
+## Exclusions
 
-## Verification
+V1 does not support arbitrary community or official-example plugin loading,
+Plan Mode, presets/tool-selection plugins, extension-triggered compaction,
+hot reload, handoff/session-navigation plugins, permission/environment plugins,
+terminal UI adaptation, background child jobs or recursive subagent tools.
+
+## Validation
 
 ```sh
 pnpm check
 pnpm build
 pnpm smoke
+pnpm pack
 ```
 
-CI also packs the adapter, installs the tarball into an isolated directory with
-production dependencies, and runs the same smoke against its installed entry:
+Unit tests protect transport failure, session identity, steering, final outcomes,
+cancellation and delivery ordering. The native smoke uses the official CLI and a
+local synthetic model endpoint, not a test provider plugin. It checks question
+answers/cancellation, todo recovery, subagent lifecycle/output/cancel and plugin
+discovery exclusion. The same script accepts an installed dist/index.js path.
 
-```sh
-node scripts/smoke.mjs /absolute/install/node_modules/acp-extension-pi/dist/index.js
-```
-
-SDK smoke tests cover native prompt metadata, fresh/stale contexts, replacement,
-reload, automatic compaction, background work and cancellation. Worker tests gate a
-real extension preflight and prove neither prompt nor Stop returns early, then prove
-the cancelled provider never starts. ACP smoke also answers and cancels extension
-questions started by settled callbacks and detached background work.
-Unit tests cover framing/correlation, lifecycle settlement, retry, cancellation,
-EOF, repeated steering identities and output order, native resume, model configuration,
-usage and interactive input. The executable smoke uses a real pinned Pi runtime
-with a synthetic offline provider: text/image/file-context delivery to the model,
-rejected binary input followed by a successful turn, actual file write, input commands, questions,
-stats, stdio MCP text/image/structured/error results, cancellation, changed server
-configuration on resume/replacement, failed MCP setup, empty-selection removal,
-MCP process/configuration cleanup, adapter signal shutdown with a real bash process, process
-restart/native resume, and failed session replacement with explicit recovery.
-It requires no provider credentials or network calls after dependency installation.
-Temporary synthetic artifacts are retained at the printed path.
-
-The smoke also covers extension-driven new/fork/switch rejection, same-file tree
-navigation refusal, asynchronous compaction from commands and model callbacks,
-compaction cancellation and recovery, same-file reload
-and failed-reload recovery, dynamic MCP tool conflicts, and native steering while
-an ordinary extension owns the former `lody-steer` command name.
-To verify a separately installed `question` tool using Pi's standard select/input
-dialogs, run `PI_QUESTION_EXTENSION=/absolute/path/question.ts pnpm smoke`.
-This optional check covers duplicate option labels, custom answers, empty or
-cancelled input returning to options, question cancellation, Stop and late answers.
-The local question plugin passed again with the SDK worker on 2026-09-11.
-The earlier signed-in Lody desktop check passed selecting the second duplicate
-label, a Chinese custom answer, and question cancellation on the prior RPC adapter.
-Custom TUI renderers and native subagent panels are not
-provided by this adapter.
-
-A live check of adapter implementation `3828569` through Lody's existing ACP client
-passed CommandCode / DeepSeek V4 Flash file writes, acknowledged steering and the
-host ownership lease, compaction, stats and process restart/native resume. It used
-an isolated Pi profile with a smaller recent-context retention threshold for
-compaction. A separate real-model ACP check passed MCP failed-result presentation,
-continuation after failure, cancellation delivered to the MCP server, and a new
-file-writing turn after cancellation. Credentials and normal Pi settings were
-unchanged; real transcripts are not committed.
-
-Windows process-tree shutdown/packaging and other providers remain unverified. The
-original spike's full Electron validation is historical evidence.
-No Core opt-out extension or Host MCP changes are required. Builtin registration
-and managed artifact/release integration remain open. No npm or managed runtime
-release is claimed by this initial source push.
-
-A source-built local Electron check passed a selected workspace stdio tool through
-the complete Desktop/CLI/ACP/Pi path. Its builtin authentication-address error came
-from using the no-cloud source composition and is not a Pi integration prerequisite.
-
-On 2026-09-08, the signed-in Lody 0.92.1 desktop passed a separate live check using
-the current adapter as a custom command and CommandCode / DeepSeek V4 Flash:
-
-- Native file writes and builtin `lody_session_list` returning the actual current
-  session after resolving the real project id through `lody_session_create_options`.
-- Steering during a gated bash tool changed the actual file outcome: the new file
-  existed and the superseded file was never written.
-- Stopping a gated tool terminated its process; the following turn wrote a file,
-  surfaced a missing-file error and settled normally.
-- After terminating the idle adapter and refreshing the desktop, Lody resumed the
-  same native session file; the model recalled the prior result without tools.
-
-The restart check also exposed a Host warning: configuration application against
-the closed connection was described as a rejected thinking setting. The subsequent
-restore successfully reapplied that setting and completed the turn. This warning
-is recorded separately from adapter recovery. No Lody/Core patches were loaded for
-this desktop check. This is scoped acceptance, not a claim that every builtin tool,
-provider, desktop workflow or platform has been tested.
-
-## Upstream contract and provenance
-
-RPC behavior was checked against Pi 0.85.1's
-[`rpc-mode.ts`](https://github.com/earendil-works/pi/blob/v0.85.1/packages/coding-agent/src/modes/rpc/rpc-mode.ts),
-[`agent-session.ts`](https://github.com/earendil-works/pi/blob/v0.85.1/packages/coding-agent/src/core/agent-session.ts), and
-[`RPC documentation`](https://github.com/earendil-works/pi/blob/v0.85.1/packages/coding-agent/docs/rpc.md).
-
-The translation, extension and protocol tests are adapted from Lody's Apache-2.0
-[spike commit](https://github.com/Astro-Han/Lody/commit/4d78cc720c08bc35b5cac0971ae2db01e2fc86b5).
-This version moves the translation behind ACP stdio, adds standalone runtime
-ownership/build/testing and removes Lody-private imports. The direct connection
-branch in PR #464 is preserved as spike evidence, not the production integration.
+These checks do not establish current Electron visual acceptance or real-provider
+quality. Historical checks of the previous SDK implementation do not validate
+this architecture.

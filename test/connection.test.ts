@@ -64,6 +64,7 @@ function peer() {
   };
   let onPrompt = (request: Record<string, unknown>) => {
     defaultPrompt = request;
+    reply(request);
     emit({ type: "agent_start" });
     emit({ type: "message_start", message: { role: "assistant" } });
   };
@@ -261,127 +262,6 @@ const text = (value: string) => ({
 });
 
 describe("native Pi connection", () => {
-  it("projects visible extension output without exposing hidden context or turning notices into failure", async () => {
-    const p = peer();
-    await start(p);
-    p.emit({
-      type: "message_end",
-      message: {
-        role: "custom",
-        customType: "fixture",
-        display: true,
-        content: "idle visible",
-      },
-    });
-    p.setPrompt((request) => {
-      for (const [customType, display, content] of [
-        ["fixture", true, "visible"],
-        ["fixture", false, "hidden"],
-        ["lody-steer", true, "owned-steer"],
-      ] as const)
-        p.emit({
-          type: "message_end",
-          message: { role: "custom", customType, display, content },
-        });
-      p.emit({
-        type: "extension_ui_request",
-        id: "notice",
-        method: "notify",
-        message: "extension error notice",
-        notifyType: "error",
-      });
-      p.reply(request);
-    });
-    await expect(p.client.prompt(prompt)).resolves.toEqual({
-      stopReason: "end_turn",
-    });
-    expect(
-      p.updates
-        .filter((n) => n.update.sessionUpdate === "agent_message_chunk")
-        .map((n) => n.update),
-    ).toEqual(
-      ["idle visible", "visible"].map((text) => ({
-        sessionUpdate: "agent_message_chunk",
-        content: { type: "text", text },
-      })),
-    );
-    expect(p.updates).toContainEqual({
-      sessionId: prompt.sessionId,
-      update: {
-        sessionUpdate: "session_info_update",
-        _meta: {
-          lody: {
-            notice: {
-              level: "error",
-              message: "extension error notice",
-              source: "pi",
-            },
-          },
-        },
-      },
-    });
-    p.close();
-  });
-  it.each(["success", "error", "cancel", "disconnect"])(
-    "settles extension-owned compaction and admits recovery (%s)",
-    async (outcome) => {
-      const p = peer();
-      await start(p);
-      let command!: Record<string, unknown>;
-      p.setPrompt((request) => {
-        command = request;
-        p.state.isCompacting = true;
-        p.emit({ type: "compaction_start", reason: "manual" });
-      });
-      const result = p.client.prompt(prompt);
-      const assertion =
-        outcome === "error" || outcome === "disconnect"
-          ? expect(result).rejects.toThrow(
-              outcome === "error" ? "Summary failed" : "closed",
-            )
-          : expect(result).resolves.toMatchObject({
-              stopReason: outcome === "cancel" ? "cancelled" : "end_turn",
-            });
-      await p.promptReceived.promise;
-      await expect(p.client.prompt(prompt)).rejects.toThrow();
-      const end = () => {
-        p.state.isCompacting = false;
-        p.setStats((request) =>
-          p.reply(request, {
-            tokens: { input: 99, output: 10, cacheRead: 4, cacheWrite: 2 },
-            cost: 0.03,
-          }),
-        );
-        p.emit({
-          type: "compaction_end",
-          reason: "manual",
-          aborted: outcome === "cancel",
-          errorMessage: outcome === "error" ? "Summary failed" : undefined,
-          result: outcome === "success" ? { tokensBefore: 100 } : undefined,
-        });
-        p.reply(command);
-      };
-      if (outcome === "cancel") {
-        p.setAbort((request) => {
-          end();
-          p.reply(request);
-        });
-        await p.client.cancel({ sessionId: prompt.sessionId });
-      } else if (outcome === "disconnect") p.close();
-      else end();
-      await assertion;
-      if (outcome !== "disconnect") {
-        expect(p.usages.at(-1)?.usage.inputTokens).toBe(99);
-        p.setPrompt((request) => {
-          p.reply(request);
-        });
-        await expect(p.client.prompt(prompt)).resolves.toMatchObject({
-          stopReason: "end_turn",
-        });
-        p.close();
-      }
-    },
-  );
   it.each(["reply-error", "eof"])(
     "distinguishes optional initial stats failure from a dead Pi transport (%s)",
     async (failure) => {
@@ -402,33 +282,6 @@ describe("native Pi connection", () => {
       }
     },
   );
-
-  it("rejects extension-owned replacement and failed reload, then allows explicit recovery", async () => {
-    const p = peer();
-    await start(p);
-    for (const replacement of [false, true]) {
-      p.setPrompt((request) => {
-        p.emit({ type: "lody_not_ready" });
-        if (replacement) {
-          p.state.sessionFile = "/work/replaced.jsonl";
-          p.emit({
-            type: "lody_steer_ready",
-            version: 1,
-            command: "private-steer",
-            sessionFile: p.state.sessionFile,
-          });
-        }
-        p.reply(request);
-      });
-      await expect(p.client.prompt(prompt)).rejects.toThrow(
-        /initialize|changed its native session/,
-      );
-      await expect(p.client.prompt(prompt)).rejects.toThrow();
-      const next = await p.client.newSession({ cwd: "/work", mcpServers: [] });
-      expect(next.sessionId).toBe(p.state.sessionFile);
-    }
-    p.close();
-  });
 
   it.each([false, true])(
     "preserves final length but clears it after a successful retry (%s)",
@@ -488,7 +341,7 @@ describe("native Pi connection", () => {
     },
   );
 
-  it.each(["stop", "length", "error", "aborted", "handled"])(
+  it.each(["stop", "length", "error", "aborted"])(
     "keeps %s authoritative when post-turn model options disappear",
     async (outcome) => {
       const p = peer();
@@ -584,28 +437,6 @@ describe("native Pi connection", () => {
         );
       }
     }
-    p.close();
-  });
-
-  it("refreshes extension-selected model and thinking after a handled command", async () => {
-    const p = peer();
-    await start(p);
-    p.setPrompt((request) => {
-      p.state.model = { ...model, id: "two" };
-      p.state.thinkingLevel = "off";
-      p.reply(request);
-    });
-    await p.client.prompt(prompt);
-    expect(
-      p.updates.find((n) => n.update.sessionUpdate === "config_option_update"),
-    ).toMatchObject({
-      update: {
-        configOptions: [
-          { id: "model", currentValue: "fixture/two" },
-          { id: "thinking", currentValue: "off" },
-        ],
-      },
-    });
     p.close();
   });
 
@@ -1077,7 +908,7 @@ describe("native Pi connection", () => {
     p.close();
   });
 
-  it.each(["before", "after", "handled", "model-error"])(
+  it.each(["before", "after", "model-error"])(
     "keeps extension diagnostics separate from the result: %s",
     async (phase) => {
       const p = peer();
@@ -1131,49 +962,6 @@ describe("native Pi connection", () => {
     },
   );
 
-  it("reports handled input without misclassifying errors or empty model runs", async () => {
-    const p = peer();
-    await start(p);
-    const notices = () =>
-      p.updates.flatMap((notification) => {
-        const notice = notification.update._meta?.lody?.notice;
-        return notice ? [notice] : [];
-      });
-    p.setPrompt((request) => p.reply(request));
-    await expect(p.client.prompt(prompt)).resolves.toEqual({
-      stopReason: "end_turn",
-    });
-    expect(notices()).toEqual([
-      {
-        level: "info",
-        message: "Pi processed this input without starting a model turn.",
-        source: "pi",
-      },
-    ]);
-    p.setPrompt((request) => p.reply(request, undefined, "No API key found"));
-    await expect(p.client.prompt(prompt)).rejects.toThrow("No API key found");
-    p.setPrompt((request) => {
-      p.emit({ type: "agent_start" });
-      p.reply(request);
-      p.finish();
-    });
-    await expect(p.client.prompt(prompt)).resolves.toEqual({
-      stopReason: "end_turn",
-    });
-    expect(notices()).toHaveLength(1);
-    p.setPrompt((request) => {
-      p.emit({
-        type: "extension_error",
-        event: "command",
-        error: "Command failed",
-      });
-      p.reply(request);
-    });
-    await expect(p.client.prompt(prompt)).rejects.toThrow("Command failed");
-    expect(notices()).toHaveLength(1);
-    p.close();
-  });
-
   it("fails a settled model error even after partial text, but allows a later prompt", async () => {
     const p = peer();
     await start(p);
@@ -1212,7 +1000,11 @@ describe("native Pi connection", () => {
       status: "failed",
       _meta: { lody: { activity: { failureReason: "Model unavailable" } } },
     });
-    p.setPrompt((request) => p.reply(request));
+    p.setPrompt((request) => {
+      p.emit({ type: "agent_start" });
+      p.reply(request);
+      p.finish();
+    });
     await expect(p.client.prompt(prompt)).resolves.toEqual({
       stopReason: "end_turn",
     });
@@ -1245,7 +1037,11 @@ describe("native Pi connection", () => {
     const cancelled = p.client.cancel({ sessionId: prompt.sessionId });
     const repeated = p.client.cancel({ sessionId: prompt.sessionId });
     const request = await stats.promise;
-    p.setPrompt((request) => p.reply(request));
+    p.setPrompt((request) => {
+      p.emit({ type: "agent_start" });
+      p.reply(request);
+      p.finish();
+    });
     const next = p.client.prompt(prompt);
     // If admission rejects while stats are pending, this assertion fails even though
     // the old run has already reached Pi's settled event.
@@ -1533,6 +1329,8 @@ describe("native Pi connection", () => {
     let command!: Record<string, unknown>;
     p.setPrompt((request) => {
       command = request;
+      p.reply(request);
+      p.emit({ type: "agent_start" });
       p.emit({
         type: "extension_ui_request",
         id: "held",
