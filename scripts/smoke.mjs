@@ -391,6 +391,7 @@ try {
             throw "Descendant survived adapter exit: $processId"
           }
         }
+        exit 0
       `,
         ],
         { stdio: "pipe" },
