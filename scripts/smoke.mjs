@@ -78,6 +78,11 @@ const server = createServer(async (request, response) => {
         "subagent",
         { task: "CHILD_HOLD", description: "Cancelled child" },
       ];
+    if (content.includes("SUB_LENGTH"))
+      tool = [
+        "subagent",
+        { task: "CHILD_LENGTH", description: "Truncated child" },
+      ];
   }
   if (content === "CHILD_HOLD") {
     releaseChild = response;
@@ -107,7 +112,7 @@ const server = createServer(async (request, response) => {
       role: "assistant",
       content: content === "CHILD_TEST" ? "CHILD_RESULT" : "DONE",
     });
-    chunk({}, "stop");
+    chunk({}, content === "CHILD_LENGTH" ? "length" : "stop");
   }
   response.end("data: [DONE]\n\n");
 });
@@ -276,6 +281,21 @@ try {
         update._meta.lody.task.status === "completed",
     ),
   );
+  const beforeLength = updates.length;
+  await a.prompt("SUB_LENGTH");
+  const lengthUpdates = updates.slice(beforeLength);
+  const truncated = lengthUpdates
+    .filter(
+      (update) => update._meta?.lody?.task?.description === "Truncated child",
+    )
+    .at(-1)._meta.lody.task;
+  assert.equal(truncated.status, "failed");
+  assert.equal(truncated.error, "length");
+  const lengthTool = lengthUpdates.find(
+    (update) => update.title === "subagent" && update.status === "failed",
+  );
+  assert.equal(lengthTool.rawOutput.details.isError, true);
+  assert.match(lengthTool.rawOutput.content[0].text, /^length\n/);
   const running = a.prompt("CANCEL_SUB");
   await heldChild;
   assert.ok(

@@ -190,7 +190,9 @@ export function registerSubagents(
               event.message?.role === "assistant"
             ) {
               append("\n");
-              failed = ["error", "aborted"].includes(event.message.stopReason);
+              failed = ["error", "aborted", "length"].includes(
+                event.message.stopReason,
+              );
               if (failed) {
                 info.stopReason =
                   event.message.errorMessage ?? event.message.stopReason;
@@ -233,8 +235,7 @@ export function registerSubagents(
           {
             type: "text" as const,
             text:
-              task.output ||
-              info.stopReason ||
+              [info.stopReason, task.output].filter(Boolean).join("\n") ||
               "Subagent completed without text output",
           },
         ],
