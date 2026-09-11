@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
+import { spawn, execFileSync } from "node:child_process";
+import { createRequire } from "node:module";
 import { once } from "node:events";
 import { createServer } from "node:http";
 import { mkdir, mkdtemp, writeFile, access } from "node:fs/promises";
@@ -177,6 +178,7 @@ async function start(sessionId) {
     : await client.newSession({ cwd: root, mcpServers });
   const id = result.sessionId ?? sessionId;
   return {
+    process: child,
     client,
     id,
     prompt: (text) =>
@@ -342,6 +344,29 @@ try {
   const childDisconnected = once(releaseChild, "close");
   await b.close();
   await Promise.all([interrupted, childDisconnected]);
+  if (process.platform === "win32" && process.env.PROOF_MODULE) {
+    const native = createRequire(import.meta.url)(process.env.PROOF_MODULE);
+    const c = await start();
+    const held = new Promise(resolve => { childRequest = resolve; });
+    const rejectedPrompt = assert.rejects(c.prompt("CANCEL_SUB"));
+    await held;
+    // Actual official Pi is now waiting on a model request in a native subagent.
+    const rows = JSON.parse(execFileSync('powershell.exe', ['-NoProfile', '-Command',
+      'Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId | ConvertTo-Json -Compress'
+    ], { encoding: 'utf8' }));
+    const pi = rows.find(row => row.ParentProcessId === c.process.pid);
+    assert.ok(pi, 'native Pi child found');
+    const descendants = rows.filter(row => row.ParentProcessId === pi.ProcessId);
+    assert.ok(descendants.length >= 2, 'MCP server and native subagent are running');
+    const adapterExited = once(c.process, 'exit');
+    process.kill(pi.ProcessId, 'SIGKILL'); // Deliberately not a tree kill.
+    await Promise.all([adapterExited, rejectedPrompt]);
+    children.delete(c.process);
+    for (const row of descendants)
+      assert.ok(native.exited(row.ProcessId, 5000), `orphan survived: ${row.ProcessId}`);
+    releaseChild.destroy();
+    console.log('PASS actual Pi root crash: adapter, MCP and native subagent all exit');
+  }
   await assert.rejects(access(marker));
   const rejected = spawn(
     process.execPath,
