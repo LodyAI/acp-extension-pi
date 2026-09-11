@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 import type {
   ExtensionAPI,
   ExtensionContext,
@@ -120,7 +121,11 @@ export function registerSubagents(
           return;
         if (process.platform === "win32") {
           const killer = spawn(
-            "taskkill",
+            join(
+              process.env.SystemRoot ?? "C:\\Windows",
+              "System32",
+              "taskkill.exe",
+            ),
             ["/pid", String(proc.pid), "/T", ...(force ? ["/F"] : [])],
             { stdio: "ignore", windowsHide: true },
           );

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { spawn, execFileSync } from "node:child_process";
 import { once } from "node:events";
 import { createServer } from "node:http";
-import { mkdir, mkdtemp, writeFile, access } from "node:fs/promises";
+import { mkdir, mkdtemp, writeFile, access, copyFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -13,6 +13,10 @@ import { LODY_EXTENSION_METHODS } from "acp-extension-core";
 // Real official CLI and packaged extensions, with a local deterministic model.
 // No injected provider plugin or alternate runtime implementation.
 const root = await mkdtemp(join(tmpdir(), "pi-v1-smoke-"));
+if (process.platform === "win32") {
+  // Cancellation must use the system executable, never a repository-local namesake.
+  await copyFile(process.execPath, join(root, "taskkill.exe"));
+}
 const profile = join(root, "profile");
 await mkdir(join(profile, "extensions"), { recursive: true });
 await mkdir(join(root, ".pi", "extensions"), { recursive: true });
