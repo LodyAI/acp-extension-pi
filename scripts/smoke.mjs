@@ -382,7 +382,7 @@ try {
           [
             "-NoProfile",
             "-Command",
-            "Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId | ConvertTo-Json -Compress",
+            "Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,Name,CreationDate,CommandLine | ConvertTo-Json -Compress",
           ],
           { encoding: "utf8" },
         ),
@@ -391,6 +391,18 @@ try {
       assert.ok(pi, "native Pi child found");
       const descendants = rows.filter(
         (row) => row.ParentProcessId === pi.ProcessId,
+      );
+      console.log(
+        "Windows crash probe",
+        JSON.stringify({
+          crash,
+          adapterPid: c.process.pid,
+          selectedPi: pi,
+          adapterChildren: rows.filter(
+            (row) => row.ParentProcessId === c.process.pid,
+          ),
+          descendants,
+        }),
       );
       assert.ok(descendants.length >= 2, "MCP and native subagent are running");
       const exited = once(c.process, "exit");
