@@ -382,29 +382,41 @@ try {
           [
             "-NoProfile",
             "-Command",
-            "Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,Name,CreationDate,CommandLine | ConvertTo-Json -Compress",
+            "Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,Name,@{Name='CreatedAt';Expression={([DateTimeOffset]$_.CreationDate).ToUnixTimeMilliseconds()}},CommandLine | ConvertTo-Json -Compress",
           ],
           { encoding: "utf8" },
         ),
       );
-      const pi = rows.find((row) => row.ParentProcessId === c.process.pid);
-      assert.ok(pi, "native Pi child found");
-      const descendants = rows.filter(
-        (row) => row.ParentProcessId === pi.ProcessId,
+      const adapter = rows.find((row) => row.ProcessId === c.process.pid);
+      assert.ok(adapter, "adapter process found");
+      // Windows retains the original parent PID after that parent exits. A
+      // reused PID does not make an older process this adapter's child.
+      const childrenOf = (processes, parent) =>
+        processes.filter(
+          (row) =>
+            row.ParentProcessId === parent.ProcessId &&
+            row.CreatedAt >= parent.CreatedAt,
+        );
+      const candidates = childrenOf(rows, adapter).filter(
+        (row) =>
+          /[\\/]pi-coding-agent[\\/]dist[\\/]bundle[\\/]cli\.js/.test(
+            row.CommandLine ?? "",
+          ) && /\s--mode rpc(?:\s|$)/.test(row.CommandLine),
       );
-      console.log(
-        "Windows crash probe",
-        JSON.stringify({
-          crash,
-          adapterPid: c.process.pid,
-          selectedPi: pi,
-          adapterChildren: rows.filter(
-            (row) => row.ParentProcessId === c.process.pid,
-          ),
-          descendants,
-        }),
+      assert.equal(
+        candidates.length,
+        1,
+        `Expected one native RPC Pi: ${JSON.stringify({ crash, adapter, candidates, children: childrenOf(rows, adapter) })}`,
       );
-      assert.ok(descendants.length >= 2, "MCP and native subagent are running");
+      const [pi] = candidates;
+      // Exercise PID reuse and enumeration order using this real snapshot.
+      const older = { ...pi, CreatedAt: adapter.CreatedAt - 1 };
+      assert.deepEqual(childrenOf([older, pi], adapter), [pi]);
+      const descendants = childrenOf(rows, pi);
+      assert.ok(
+        descendants.length >= 2,
+        `MCP and native subagent are running: ${JSON.stringify({ crash, adapter, pi, descendants })}`,
+      );
       const exited = once(c.process, "exit");
       process.kill(crash === "pi" ? pi.ProcessId : c.process.pid, "SIGKILL");
       const [[code]] = await Promise.all([exited, rejectedPrompt]);
