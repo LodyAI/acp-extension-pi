@@ -17,16 +17,11 @@ const modelSchema = z.object({
   provider: z.string(),
   id: z.string(),
   name: z.string(),
-  contextWindow: z.number().nonnegative(),
 });
 const stateSchema = z.object({
-  sessionId: z.string(),
   sessionFile: z.string().optional(),
   model: modelSchema.nullish(),
   thinkingLevel: z.string(),
-  isStreaming: z.boolean(),
-  isCompacting: z.boolean(),
-  pendingMessageCount: z.number(),
 });
 const contentSchema = z.array(
   z.discriminatedUnion("type", [
@@ -67,10 +62,6 @@ const questionSchema = z.object({
   id: z.string(),
   method: z.string(),
   title: z.string().optional(),
-  message: z.string().optional(),
-  prefill: z.string().optional(),
-  options: z.array(z.string()).optional(),
-  timeout: z.number().nonnegative().optional(),
 });
 
 function deferred<T>() {
@@ -672,32 +663,6 @@ export class PiRpcConnection implements AgentConnection {
       void this.question(request).catch(() => undefined);
       return;
     }
-    if (
-      event.type === "message_end" &&
-      z.object({ role: z.string() }).parse(event.message).role === "custom"
-    ) {
-      const custom = z
-        .object({
-          customType: z.string(),
-          display: z.boolean(),
-          content: z.union([z.string(), contentSchema]),
-        })
-        .parse(event.message);
-      // The driving ACP turn already owns steering text. Hidden custom context
-      // is for Pi's model, not another visible transcript entry.
-      if (custom.display && custom.customType !== "lody-steer") {
-        const content =
-          typeof custom.content === "string"
-            ? [{ type: "text" as const, text: custom.content }]
-            : custom.content;
-        for (const block of content)
-          await this.update({
-            sessionUpdate: "agent_message_chunk",
-            content: block,
-          });
-      }
-      return;
-    }
     const run = this.active;
     if (event.type === "extension_error" && (!run || run.completed)) {
       process.stderr.write(`Pi extension diagnostic: ${String(event.error)}\n`);
@@ -1036,8 +1001,6 @@ export class PiRpcConnection implements AgentConnection {
   private async question(
     request: z.infer<typeof questionSchema>,
   ): Promise<void> {
-    if (!["select", "confirm", "input", "editor"].includes(request.method))
-      return;
     const run = this.active;
     const cancel = () =>
       this.rpc.send({
@@ -1046,6 +1009,8 @@ export class PiRpcConnection implements AgentConnection {
         cancelled: true,
       });
     if (
+      request.method !== "input" ||
+      !request.title?.startsWith(QUESTION_PREFIX) ||
       !run ||
       run.completed ||
       run.cancelled ||
@@ -1053,8 +1018,6 @@ export class PiRpcConnection implements AgentConnection {
       !this.steerCommand
     )
       return cancel();
-    const options =
-      request.method === "confirm" ? ["Yes", "No"] : request.options;
     const respond = async (fields: Record<string, unknown>): Promise<void> => {
       if (!this.questions.delete(request.id)) return;
       await this.rpc.send({
@@ -1065,124 +1028,51 @@ export class PiRpcConnection implements AgentConnection {
     };
     this.questions.set(request.id, () => respond({ cancelled: true }));
     try {
-      if (
-        request.method === "input" &&
-        request.title?.startsWith(QUESTION_PREFIX)
-      ) {
-        const form = z
-          .object({ toolCallId: z.string(), questions: questionsSchema })
-          .parse(JSON.parse(request.title.slice(QUESTION_PREFIX.length)));
-        const properties: Extract<
-          acp.CreateElicitationRequest,
-          { mode?: "form" }
-        >["requestedSchema"]["properties"] = {};
-        for (const [index, question] of form.questions.entries()) {
-          const key = `q${index}`;
-          properties[key] = {
+      const form = z
+        .object({ toolCallId: z.string(), questions: questionsSchema })
+        .parse(JSON.parse(request.title.slice(QUESTION_PREFIX.length)));
+      const properties: Extract<
+        acp.CreateElicitationRequest,
+        { mode?: "form" }
+      >["requestedSchema"]["properties"] = {};
+      for (const [index, question] of form.questions.entries()) {
+        const key = `q${index}`;
+        properties[key] = {
+          type: "string",
+          title: question.header,
+          description: question.question,
+          ...(question.options.length
+            ? {
+                oneOf: question.options.map((option) => ({
+                  const: option.label,
+                  title: option.label,
+                  ...(option.description
+                    ? { description: option.description }
+                    : {}),
+                })),
+              }
+            : {}),
+        };
+        if (question.options.length && question.allowCustomAnswer)
+          properties[`${key}_custom`] = {
             type: "string",
-            title: question.header,
-            description: question.question,
-            ...(question.options.length
-              ? {
-                  oneOf: question.options.map((option) => ({
-                    const: option.label,
-                    title: option.label,
-                    ...(option.description
-                      ? { description: option.description }
-                      : {}),
-                  })),
-                }
-              : {}),
-          };
-          if (question.options.length && question.allowCustomAnswer)
-            properties[`${key}_custom`] = {
-              type: "string",
-              _meta: {
-                lody: { elicitation: { version: 1, customAnswerFor: key } },
-              },
-            };
-        }
-        const response = await this.host.question({
-          mode: "form",
-          sessionId: this.sessionId,
-          toolCallId: form.toolCallId,
-          message:
-            form.questions.length === 1
-              ? form.questions[0].question
-              : "Pi needs your input",
-          requestedSchema: { type: "object", properties },
-          _meta: {
-            lody: {
-              elicitation: { version: 1, autoResolveAfterSeconds: null },
+            _meta: {
+              lody: { elicitation: { version: 1, customAnswerFor: key } },
             },
-          },
-        });
-        if (
-          this.active !== run ||
-          run.cancelled ||
-          run.completed ||
-          response.action !== "accept"
-        )
-          return respond({ cancelled: true });
-        const content = z
-          .record(z.string(), z.unknown())
-          .parse(response.content);
-        const answers: Record<string, string> = {};
-        for (const [index, question] of form.questions.entries()) {
-          const custom = content[`q${index}_custom`];
-          const value =
-            question.allowCustomAnswer &&
-            typeof custom === "string" &&
-            custom.trim()
-              ? custom
-              : content[`q${index}`];
-          if (
-            typeof value !== "string" ||
-            !value.trim() ||
-            (!question.allowCustomAnswer &&
-              question.options.length &&
-              !question.options.some((option) => option.label === value))
-          )
-            return respond({ cancelled: true });
-          answers[question.id] = value;
-        }
-        return respond({ value: JSON.stringify(answers) });
+          };
       }
       const response = await this.host.question({
         mode: "form",
         sessionId: this.sessionId,
-        message: [
-          request.title,
-          request.message,
-          request.prefill ? `Current text:\n${request.prefill}` : undefined,
-        ]
-          .filter(Boolean)
-          .join("\n"),
-        requestedSchema: {
-          type: "object",
-          properties: {
-            answer: {
-              type: "string",
-              title: request.title ?? "Pi",
-              ...(options
-                ? {
-                    oneOf: options.map((value) => ({
-                      const: value,
-                      title: value,
-                    })),
-                  }
-                : {}),
-            },
-          },
-          required: ["answer"],
-        },
+        toolCallId: form.toolCallId,
+        message:
+          form.questions.length === 1
+            ? form.questions[0].question
+            : "Pi needs your input",
+        requestedSchema: { type: "object", properties },
         _meta: {
           lody: {
-            elicitation: {
-              version: 1,
-              autoResolveAfterSeconds:
-                request.timeout === undefined ? null : request.timeout / 1000,
-            },
+            elicitation: { version: 1, autoResolveAfterSeconds: null },
           },
         },
       });
@@ -1193,17 +1083,27 @@ export class PiRpcConnection implements AgentConnection {
         response.action !== "accept"
       )
         return respond({ cancelled: true });
-      const value = z
-        .object({ answer: z.string() })
-        .safeParse(response.content);
-      const answer = value.success ? value.data.answer : undefined;
-      if (typeof answer !== "string" || (options && !options.includes(answer)))
-        return respond({ cancelled: true });
-      await respond({
-        ...(request.method === "confirm"
-          ? { confirmed: answer === "Yes" }
-          : { value: answer }),
-      });
+      const content = z.record(z.string(), z.unknown()).parse(response.content);
+      const answers: Record<string, string> = {};
+      for (const [index, question] of form.questions.entries()) {
+        const custom = content[`q${index}_custom`];
+        const value =
+          question.allowCustomAnswer &&
+          typeof custom === "string" &&
+          custom.trim()
+            ? custom
+            : content[`q${index}`];
+        if (
+          typeof value !== "string" ||
+          !value.trim() ||
+          (!question.allowCustomAnswer &&
+            question.options.length &&
+            !question.options.some((option) => option.label === value))
+        )
+          return respond({ cancelled: true });
+        answers[question.id] = value;
+      }
+      return respond({ value: JSON.stringify(answers) });
     } catch {
       await respond({ cancelled: true });
     }

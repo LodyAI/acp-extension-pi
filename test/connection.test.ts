@@ -1,3 +1,4 @@
+import { QUESTION_PREFIX } from "../src/builtin-tools.js";
 import type { PiStream } from "../src/types.js";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -19,7 +20,6 @@ const model = {
   provider: "fixture",
   id: "one",
   name: "Fixture",
-  contextWindow: 4096,
 };
 const usage = {
   input: 10,
@@ -44,13 +44,9 @@ function peer() {
   const accepted = deferred();
   const questionAnswered = deferred<Record<string, unknown>>();
   const state = {
-    sessionId: "native-id",
     sessionFile: "/work/pi-session.jsonl",
     model,
     thinkingLevel: "off",
-    isStreaming: false,
-    isCompacting: false,
-    pendingMessageCount: 0,
   };
   const emit = (value: unknown) =>
     output.enqueue(new TextEncoder().encode(JSON.stringify(value) + "\n"));
@@ -1284,7 +1280,7 @@ describe("native Pi connection", () => {
         cost: 0.02,
         contextUsage: {
           tokens: 64,
-          contextWindow: p.state.model.contextWindow,
+          contextWindow: 4096,
         },
       }),
     );
@@ -1317,7 +1313,7 @@ describe("native Pi connection", () => {
     p.close();
   });
 
-  it("cancels a pending extension dialog before its host answers and ignores the late answer", async () => {
+  it("cancels a pending questionnaire before its host answers and ignores the late answer", async () => {
     const p = peer();
     await start(p);
     const seen = deferred();
@@ -1335,7 +1331,20 @@ describe("native Pi connection", () => {
         type: "extension_ui_request",
         id: "held",
         method: "input",
-        title: "Waiting",
+        title:
+          QUESTION_PREFIX +
+          JSON.stringify({
+            toolCallId: "question-tool",
+            questions: [
+              {
+                id: "q",
+                header: "Input",
+                question: "Continue?",
+                options: [],
+                allowCustomAnswer: true,
+              },
+            ],
+          }),
       });
     });
     const done = p.client.prompt(prompt);
@@ -1345,7 +1354,7 @@ describe("native Pi connection", () => {
     const cancelledBeforeAnswer = p.replies.some(
       (r) => r.id === "held" && r.cancelled === true,
     );
-    answer.resolve({ action: "accept", content: { answer: "too late" } });
+    answer.resolve({ action: "accept", content: { q0: "too late" } });
     await p.questionAnswered.promise;
     p.reply(command);
     await expect(done).resolves.toEqual({ stopReason: "cancelled" });
@@ -1357,14 +1366,27 @@ describe("native Pi connection", () => {
     p.close();
   });
 
-  it("answers extension dialogs without blocking the wire, and rejects startup questions", async () => {
+  it("rejects startup questionnaires and unsupported dialogs without blocking the wire", async () => {
     const p = peer();
     await start(p);
     p.emit({
       type: "extension_ui_request",
       id: "startup",
       method: "input",
-      title: "Before prompt",
+      title:
+        QUESTION_PREFIX +
+        JSON.stringify({
+          toolCallId: "question-tool",
+          questions: [
+            {
+              id: "q",
+              header: "Input",
+              question: "Continue?",
+              options: [],
+              allowCustomAnswer: true,
+            },
+          ],
+        }),
     });
     await expect(p.questionAnswered.promise).resolves.toMatchObject({
       id: "startup",
@@ -1384,7 +1406,7 @@ describe("native Pi connection", () => {
     });
     await expect(active.questionAnswered.promise).resolves.toMatchObject({
       id: "in-turn",
-      value: "chosen",
+      cancelled: true,
     });
     active.emit(text("working"));
     active.finish();
