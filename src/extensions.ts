@@ -1,4 +1,4 @@
-import { readFileSync, statSync } from "node:fs";
+import { readFileSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, isAbsolute, join, normalize } from "node:path";
 import { z } from "zod";
@@ -39,7 +39,7 @@ const settingsSchema = z.object({
 });
 
 function normalizeExtensionPath(value: string): string {
-  let path = value;
+  let path = value.trim();
   if (path === "~") path = homedir();
   else if (path.startsWith("~/") || path.startsWith("~\\"))
     path = join(homedir(), path.slice(2));
@@ -76,8 +76,11 @@ export function parsePiLaunchArgs(args: string[]): {
     i++;
     if (flag === "-e" || flag === "--extension") {
       const path = normalizeExtensionPath(value);
-      if (seen.has(path)) continue;
-      seen.add(path);
+      // Dedupe on the resolved path so case or symlink aliases of the same
+      // file do not reach Pi twice.
+      const key = realpathSync(path);
+      if (seen.has(key)) continue;
+      seen.add(key);
       extensions.push(path);
       if (extensions.length > MAX_SELECTIONS)
         throw new Error(
@@ -108,15 +111,13 @@ export async function discoverPiExtensions(): Promise<{
   const agentDir = getAgentDir();
   const settingsPath = join(agentDir, "settings.json");
   let content: string | undefined;
-  let oversized = false;
   try {
-    oversized = statSync(settingsPath).size > MAX_SETTINGS_BYTES;
-    if (!oversized) content = readFileSync(settingsPath, "utf8");
+    content = readFileSync(settingsPath, "utf8");
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT")
       throw new Error(`Pi settings could not be read: ${settingsPath}`);
   }
-  if (oversized)
+  if (content !== undefined && Buffer.byteLength(content) > MAX_SETTINGS_BYTES)
     throw new Error(`Pi settings exceed the 1 MiB limit: ${settingsPath}`);
   let settings = {};
   if (content !== undefined) {

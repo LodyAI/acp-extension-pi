@@ -5,6 +5,7 @@ import {
   readdirSync,
   readFileSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -80,6 +81,21 @@ describe("parsePiLaunchArgs", () => {
     ]);
     expect(parsed.extensions).toEqual([file, dir]);
     expect(parsed.args).toEqual(["--model", "fixture", "-e", file, "-e", dir]);
+  });
+
+  it("trims selection values and dedupes real path aliases", () => {
+    const dir = root();
+    const file = join(dir, "ext.ts");
+    writeFileSync(file, "export default function() {}");
+    const parsed = parsePiLaunchArgs(["-e", ` ${file} `, "-e", file]);
+    expect(parsed.extensions).toEqual([file]);
+    if (process.platform !== "win32") {
+      const link = join(dir, "alias.ts");
+      symlinkSync(file, link);
+      expect(parsePiLaunchArgs(["-e", link, "-e", file]).extensions).toEqual([
+        link,
+      ]);
+    }
   });
 
   it("expands tilde extension paths against the home directory", () => {

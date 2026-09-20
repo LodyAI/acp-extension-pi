@@ -53,9 +53,9 @@ export function registerSubagents(
           import.meta.resolve("@earendil-works/pi-coding-agent"),
         ),
       );
-      const extensions = z
-        .array(z.string())
-        .parse(JSON.parse(process.env[PI_EXTENSIONS_ENV] ?? "[]"));
+      const extensions: string[] = JSON.parse(
+        process.env[PI_EXTENSIONS_ENV] ?? "[]",
+      );
       const proc = spawn(
         process.execPath,
         [
