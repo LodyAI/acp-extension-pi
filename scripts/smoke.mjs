@@ -209,11 +209,15 @@ async function start(sessionId, extensionPaths = [], provider = "localtest") {
     },
   };
 }
-const deadline = setTimeout(() => {
-  for (const child of children) child.kill("SIGTERM");
-  server.closeAllConnections();
-  throw new Error("Native smoke did not converge");
-}, 45000);
+const deadline = setTimeout(
+  () => {
+    for (const child of children) child.kill("SIGTERM");
+    server.closeAllConnections();
+    throw new Error("Native smoke did not converge");
+  },
+  // windows-11-arm runners take roughly triple the x64 wall time.
+  180_000,
+);
 try {
   const a = await start();
   await a.prompt("MCP_TEST");
