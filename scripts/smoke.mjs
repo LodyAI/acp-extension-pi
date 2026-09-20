@@ -1,17 +1,18 @@
 import assert from "node:assert/strict";
-import { spawn, execFileSync } from "node:child_process";
+import { spawn, execFile, execFileSync } from "node:child_process";
 import { once } from "node:events";
 import { createServer } from "node:http";
 import { mkdir, mkdtemp, writeFile, access, copyFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
 import { Readable, Writable } from "node:stream";
 import { ClientSideConnection, ndJsonStream } from "@agentclientprotocol/sdk";
 import { LODY_EXTENSION_METHODS } from "acp-extension-core";
 
 // Real official CLI and packaged extensions, with a local deterministic model.
-// No injected provider plugin or alternate runtime implementation.
+// The baseline phase uses no external provider plugin or alternate runtime.
 const root = await mkdtemp(join(tmpdir(), "pi-v1-smoke-"));
 if (process.platform === "win32") {
   // Cancellation must use the system executable, never a repository-local namesake.
@@ -138,13 +139,21 @@ let answer = async (request) => {
   assert.ok(request.toolCallId);
   return { action: "accept", content: { q0: "Small", q1: "No extra scope" } };
 };
+const execFileAsync = promisify(execFile);
 const entry =
   process.argv[2] ??
   fileURLToPath(new URL("../dist/index.js", import.meta.url));
-async function start(sessionId) {
+async function start(sessionId, extensionPaths = [], provider = "localtest") {
   const child = spawn(
     process.execPath,
-    [entry, "--provider", "localtest", "--model", "fixture"],
+    [
+      entry,
+      "--provider",
+      provider,
+      "--model",
+      "fixture",
+      ...extensionPaths.flatMap((path) => ["-e", path]),
+    ],
     {
       cwd: root,
       env: {
@@ -189,6 +198,7 @@ async function start(sessionId) {
     process: child,
     client,
     id,
+    configOptions: result.configOptions,
     prompt: (text) =>
       client.prompt({ sessionId: id, prompt: [{ type: "text", text }] }),
     close: async () => {
@@ -448,10 +458,108 @@ try {
       console.log(`PASS ${crash} crash cleans native descendants`);
     }
   }
+  const discovered = JSON.parse(
+    (
+      await execFileAsync(process.execPath, [entry, "--list-extensions"], {
+        env: {
+          ...process.env,
+          HOME: root,
+          PI_CODING_AGENT_DIR: profile,
+          PI_SKIP_VERSION_CHECK: "1",
+        },
+      })
+    ).stdout,
+  );
+  assert.equal(discovered.version, 1);
+  assert.equal(discovered.agentDir, profile);
+  assert.ok(
+    discovered.extensions.some(
+      (item) => item.name === "unwanted.ts" && item.source === "directory",
+    ),
+    "ambient extension listed as a selectable candidate",
+  );
+  await assert.rejects(access(marker));
+  const plugin = join(root, "opted-in.ts");
+  await writeFile(
+    plugin,
+    `export default (pi) => pi.registerProvider("extensiontest", ${JSON.stringify(
+      {
+        api: "openai-completions",
+        apiKey: "synthetic",
+        baseUrl: `http://127.0.0.1:${server.address().port}/v1`,
+        models: [
+          {
+            id: "fixture",
+            name: "Extension fixture",
+            reasoning: false,
+            input: ["text"],
+            cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+            contextWindow: 32000,
+            maxTokens: 4096,
+          },
+        ],
+      },
+    )});`,
+  );
+  const c = await start(undefined, [plugin], "extensiontest");
+  assert.ok(
+    c.configOptions
+      ?.find((option) => option.id === "model" || option.category === "model")
+      ?.options.some((option) => option.value === "extensiontest/fixture"),
+    "extension provider model is advertised",
+  );
+  await c.prompt("SUB_TEST");
+  const extensionTasks = await c.client.extMethod(
+    LODY_EXTENSION_METHODS.subagentsList,
+    { sessionId: c.id },
+  );
+  assert.equal(extensionTasks.tasks.at(-1).status, "completed");
+  const extensionOutput = await c.client.extMethod(
+    LODY_EXTENSION_METHODS.subagentsOutput,
+    { sessionId: c.id, taskId: extensionTasks.tasks.at(-1).taskId },
+  );
+  assert.match(extensionOutput.output, /CHILD_RESULT/);
+  await c.close();
+  const broken = join(root, "failing.ts");
+  await writeFile(
+    broken,
+    `export default function() { throw new Error('synthetic extension load failure'); }`,
+  );
+  const failing = spawn(
+    process.execPath,
+    [entry, "--provider", "localtest", "--model", "fixture", "-e", broken],
+    {
+      cwd: root,
+      env: {
+        ...process.env,
+        HOME: root,
+        PI_CODING_AGENT_DIR: profile,
+        PI_SKIP_VERSION_CHECK: "1",
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    },
+  );
+  children.add(failing);
+  failing.stderr.pipe(process.stderr);
+  const failingClient = new ClientSideConnection(
+    () => ({
+      sessionUpdate: async () => {},
+      unstable_createElicitation: () => new Promise(() => {}),
+      requestPermission: async () => ({ outcome: { outcome: "cancelled" } }),
+      extNotification: async () => {},
+    }),
+    ndJsonStream(Writable.toWeb(failing.stdin), Readable.toWeb(failing.stdout)),
+  );
+  await failingClient.initialize({ protocolVersion: 1 });
+  await Promise.all([
+    assert.rejects(failingClient.newSession({ cwd: root, mcpServers: [] })),
+    once(failing, "exit"),
+  ]);
+  children.delete(failing);
   await assert.rejects(access(marker));
   const rejected = spawn(
     process.execPath,
-    [entry, "-e", join(profile, "extensions", "unwanted.ts")],
+    [entry, "-e", join(root, "does-not-exist.ts")],
     { cwd: root, stdio: "ignore" },
   );
   assert.notEqual((await once(rejected, "exit"))[0], 0);
@@ -466,7 +574,7 @@ try {
     assert.ok(!names.includes("questionnaire") && !names.includes("subagent"));
   }
   console.log(
-    "Native Pi V1 smoke passed: questions, todo/resume, subagent lifecycle/output/cancel, Stop/recovery, extension isolation",
+    "Native Pi V1 smoke passed: questions, todo/resume, subagent lifecycle/output/cancel, Stop/recovery, ambient exclusion and explicit extension opt-in",
   );
 } finally {
   clearTimeout(deadline);

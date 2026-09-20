@@ -15,6 +15,7 @@ import {
   normalizeLodyExtensionMethod,
 } from "acp-extension-core";
 import { PiRpcConnection, initializeResponse } from "./connection.js";
+import { PI_EXTENSIONS_ENV, parsePiLaunchArgs } from "./extensions.js";
 import { MCP_CONFIG_ENV } from "./mcp.js";
 
 const SHUTDOWN_GRACE_MS = 1_000;
@@ -37,19 +38,8 @@ function waitForExit(child: ChildProcess): Promise<void> {
 
 /** One runtime per ACP connection; Pi owns its native files and tool processes. */
 export function serve(stream: Stream, piArgs: string[] = []) {
-  // Never forward extension/resource control flags to the native process.
-  const valueFlags = new Set(["--provider", "--model", "--thinking"]);
-  for (let i = 0; i < piArgs.length; i++) {
-    if (
-      !valueFlags.has(piArgs[i]) ||
-      !piArgs[i + 1] ||
-      piArgs[i + 1].startsWith("-")
-    )
-      throw new Error(
-        "Pi V1 accepts only --provider, --model and --thinking; external extensions are unsupported",
-      );
-    i++;
-  }
+  // Never forward ambient extension/resource control flags to the native process.
+  const parsed = parsePiLaunchArgs(piArgs);
   let child: ChildProcess | undefined;
   let runtime: Promise<PiRpcConnection> | undefined;
   let current: PiRpcConnection | undefined;
@@ -127,7 +117,7 @@ export function serve(stream: Stream, piArgs: string[] = []) {
         process.execPath,
         [
           entry,
-          ...piArgs,
+          ...parsed.args,
           "--mode",
           "rpc",
           "--no-extensions",
@@ -136,7 +126,11 @@ export function serve(stream: Stream, piArgs: string[] = []) {
         ],
         {
           cwd,
-          env: { ...process.env, [MCP_CONFIG_ENV]: configPath },
+          env: {
+            ...process.env,
+            [MCP_CONFIG_ENV]: configPath,
+            [PI_EXTENSIONS_ENV]: JSON.stringify(parsed.extensions),
+          },
           stdio: ["pipe", "pipe", "pipe"],
           detached: process.platform !== "win32",
         },

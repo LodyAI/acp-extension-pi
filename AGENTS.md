@@ -5,9 +5,14 @@ workspace packages or reimplement Pi's executor.
 
 - Launch the pinned official Pi CLI in RPC mode. There is no custom SDK worker,
   AgentSession facade, generic call owner or background execution scheduler.
-- Disable extension discovery and refuse external extension startup arguments.
-  Only the packaged extension is loaded. Child Pi processes disable discovery too.
-  This is a supported-feature boundary, not a sandbox against arbitrary bash.
+- Ambient and project extension discovery stay disabled. Only the packaged
+  extension and explicit -e/--extension absolute paths are loaded; selections
+  are default-off and bounded. `--list-extensions` scans globally installed
+  extensions read-only without executing them. Child Pi processes disable
+  discovery too and inherit the same explicit list, never the packaged
+  extension. This is a supported-feature boundary, not a sandbox against
+  arbitrary bash: selected extension code can add tools and no arbitrary
+  plugin compatibility is promised.
 - Packaged tools are questionnaire, todo, subagent and ACP-selected stdio MCP
   tools. Their execute promises own all work. No detached callbacks, hot reload,
   extension-driven session replacement or custom compaction.
@@ -19,7 +24,8 @@ workspace packages or reimplement Pi's executor.
 - Subagent execution owns task ids, status, output and child cancellation. Lody
   receives Core task metadata and list/output/cancel methods. Parent tools await
   child exit; child agents have built-in Pi tools, no questionnaire or subagent
-  extension. They inherit model, thinking and cwd, not the parent's MCP clients.
+  extension. They inherit model, thinking, cwd and the same explicit extension
+  list, not the parent's MCP clients.
   Process-local task queries do not resume or replay a terminated child.
 - Ordinary prompt ACK means preflight passed, not completion. With only these
   packaged tools, agent_settled terminates native model work including retries and
@@ -56,7 +62,8 @@ workspace packages or reimplement Pi's executor.
   preset/tools plugins, detached subagent jobs or native history import in V1.
 - Tests use synthetic inputs and explicit signals, no real sleeps or commercial
   providers. Unit tests protect wire contracts; smoke drives the official CLI
-  through a local deterministic model endpoint without injecting a provider plugin.
+  through a local deterministic model endpoint, with an opted-in synthetic
+  provider extension covering explicit selection in a separate phase.
 
 Implementation changes use a Draft PR. Before committing run pnpm check,
 pnpm build and pnpm smoke. Verify installed tarball behavior for packaging changes.

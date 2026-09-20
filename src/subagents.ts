@@ -9,6 +9,7 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import type { LodySubagentTask, LodyTaskMeta } from "acp-extension-core";
 import { z } from "zod";
+import { PI_EXTENSIONS_ENV } from "./extensions.js";
 
 const MAX_OUTPUT = 64 * 1024;
 type Task = {
@@ -52,6 +53,9 @@ export function registerSubagents(
           import.meta.resolve("@earendil-works/pi-coding-agent"),
         ),
       );
+      const extensions = z
+        .array(z.string())
+        .parse(JSON.parse(process.env[PI_EXTENSIONS_ENV] ?? "[]"));
       const proc = spawn(
         process.execPath,
         [
@@ -61,6 +65,7 @@ export function registerSubagents(
           "-p",
           "--no-session",
           "--no-extensions",
+          ...extensions.flatMap((path) => ["-e", path]),
           "--model",
           `${ctx.model.provider}/${ctx.model.id}`,
           "--thinking",
