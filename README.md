@@ -20,14 +20,23 @@ pnpm build
 node dist/index.js --provider <provider> --model <model>
 ```
 
-Startup accepts only --provider, --model and --thinking. Authenticate/configure
-models through Pi on the execution machine. ACP configuration also exposes model
-and thinking selection. stdout is ACP; stderr contains diagnostics.
+Startup accepts --provider, --model and --thinking plus repeatable
+-e/--extension flags naming an existing absolute or ~/ file or directory.
+Authenticate/configure models through Pi on the execution machine. ACP
+configuration also exposes model and thinking selection. stdout is ACP;
+stderr contains diagnostics.
 
-External extensions are not supported. The adapter disables automatic discovery
-and refuses user-supplied extension flags. Official example extensions are not
-implicitly supported: only the implementation packaged here is loaded.
-This restriction is not a security sandbox for shell commands.
+Extensions are opt-in only. The adapter disables ambient and project
+auto-discovery; nothing outside an explicit -e/--extension path and the
+packaged extension is loaded. `node dist/index.js --list-extensions` performs
+a read-only scan of globally installed extensions and prints candidates as
+JSON; it never executes extension code. The same explicitly selected paths
+are passed to native subagent children; the packaged adapter extension is
+not forwarded. Remote or package-spec sources (npm:, git:, URLs) and relative
+paths are refused. Selected extension code runs with Pi's full authority and
+can add tools: this boundary is a supported-feature contract, not a security
+sandbox for shell commands, and arbitrary community plugins are not a
+compatibility promise.
 
 ## V1 capabilities
 
@@ -54,8 +63,9 @@ Todo completion maps to pending/completed; the tool does not invent in-progress
 status. The /todos terminal window is not provided.
 
 Subagent launches an isolated official Pi child and waits for exit. It inherits
-the parent's model, thinking level and cwd and uses Pi's built-in tools.
-It does not inherit MCP clients or load questionnaire/subagent/user extensions.
+the parent's model, thinking level, cwd and the same explicitly selected
+extension paths, and uses Pi's built-in tools. It does not inherit MCP clients
+or load the packaged questionnaire/subagent adapter extension.
 The execution owner generates task ids and supplies Core task metadata; Lody
 presents the native task UI and forwards list/output/cancel requests.
 Output queries retain the last 64 Ki characters for the current runtime.
@@ -96,8 +106,10 @@ after its tool returns or replace the parent session.
 
 ## Exclusions
 
-V1 does not support arbitrary community or official-example plugin loading,
-Plan Mode, presets/tool-selection plugins, extension-triggered compaction,
+V1 does not support arbitrary community or official-example plugin
+compatibility, remote or package-spec extension sources, ambient or project
+extension discovery, Plan Mode, presets/tool-selection plugins,
+extension-triggered compaction,
 hot reload, handoff/session-navigation plugins, permission/environment plugins,
 terminal UI adaptation, background child jobs or recursive subagent tools.
 
@@ -117,9 +129,10 @@ pnpm pack
 
 Unit tests protect transport failure, session identity, steering, final outcomes,
 cancellation and delivery ordering. The native smoke uses the official CLI and a
-local synthetic model endpoint, not a test provider plugin. It checks question
-answers/cancellation, todo recovery, subagent lifecycle/output/cancel and plugin
-discovery exclusion. The same script accepts an installed dist/index.js path.
+local synthetic model endpoint. It checks question answers/cancellation, todo
+recovery, subagent lifecycle/output/cancel, ambient extension exclusion, and an
+explicitly selected provider extension reaching both the parent and a native
+subagent. The same script accepts an installed dist/index.js path.
 
 These checks do not establish current Electron visual acceptance or real-provider
 quality. Historical checks of the previous SDK implementation do not validate

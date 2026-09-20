@@ -1,6 +1,9 @@
 {
   "name": "acp-extension-pi",
-  "version": "0.1.0",
+  "version": "0.2.0",
+  "lody": {
+    "piExtensionsProtocolVersion": 1
+  },
   "description": "Lody-owned ACP adapter for the native Pi runtime",
   "type": "module",
   "license": "Apache-2.0",
