@@ -1,6 +1,6 @@
 # Pi ACP adapter
 
-A Lody-owned ACP adapter for the pinned official Pi CLI (0.85.1).
+A Lody-owned ACP adapter for the pinned official Pi CLI (0.87.0).
 
 ```text
 Lody → ACP Adapter → official Pi CLI --mode rpc
