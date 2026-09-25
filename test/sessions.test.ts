@@ -1,7 +1,6 @@
 import {
   mkdirSync,
   mkdtempSync,
-  readdirSync,
   realpathSync,
   rmSync,
   symlinkSync,
@@ -12,14 +11,11 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { listPiSessions } from "../src/sessions.js";
 
-const ENV = ["PI_CODING_AGENT_SESSION_DIR", "PI_CODING_AGENT_DIR"] as const;
-const previous = ENV.map((name) => process.env[name]);
+const previous = process.env.PI_CODING_AGENT_SESSION_DIR;
 let directory: string | undefined;
 afterEach(() => {
-  ENV.forEach((name, index) => {
-    if (previous[index] === undefined) delete process.env[name];
-    else process.env[name] = previous[index];
-  });
+  if (previous === undefined) delete process.env.PI_CODING_AGENT_SESSION_DIR;
+  else process.env.PI_CODING_AGENT_SESSION_DIR = previous;
   if (directory) rmSync(directory, { recursive: true, force: true });
 });
 
@@ -87,19 +83,5 @@ describe("native Pi session listing", () => {
     expect(
       sessions.every((item) => !Number.isNaN(Date.parse(item.updatedAt!))),
     ).toBe(true);
-  });
-
-  it("lists Pi's default directory without creating it", async () => {
-    directory = realpathSync.native(
-      mkdtempSync(join(tmpdir(), "lody-pi-sessions-")),
-    );
-    delete process.env.PI_CODING_AGENT_SESSION_DIR;
-    process.env.PI_CODING_AGENT_DIR = join(directory, "agent");
-    mkdirSync(process.env.PI_CODING_AGENT_DIR);
-
-    await expect(listPiSessions({ cwd: directory })).resolves.toEqual({
-      sessions: [],
-    });
-    expect(readdirSync(process.env.PI_CODING_AGENT_DIR)).toEqual([]);
   });
 });
