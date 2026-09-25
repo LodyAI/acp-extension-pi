@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import * as acp from "@agentclientprotocol/sdk";
@@ -66,10 +67,7 @@ const questionSchema = z.object({
 const todosSchema = z.object({
   todos: z.array(z.object({ text: z.string(), done: z.boolean() })),
 });
-const userContentSchema = z.union([
-  z.string(),
-  z.array(z.object({ type: z.string(), text: z.string().optional() })),
-]);
+const userContentSchema = z.union([z.string(), contentSchema]);
 const entriesSchema = z.object({
   entries: z.array(
     z.object({ id: z.string(), parentId: z.string().nullable() }).passthrough(),
@@ -123,12 +121,18 @@ function planEntries({ todos }: z.infer<typeof todosSchema>): acp.PlanEntry[] {
   }));
 }
 
-function userText(content: z.infer<typeof userContentSchema>): string {
-  return typeof content === "string"
-    ? content
-    : content
-        .flatMap((block) => (block.type === "text" && block.text) || [])
-        .join("\n\n");
+function userContent(
+  content: z.infer<typeof userContentSchema>,
+): acp.ContentBlock[] {
+  if (typeof content === "string")
+    return content ? [{ type: "text", text: content }] : [];
+  const text = content
+    .flatMap((block) => (block.type === "text" ? block.text : []))
+    .join("\n\n");
+  return [
+    ...(text ? [{ type: "text" as const, text }] : []),
+    ...content.filter((block) => block.type === "image"),
+  ];
 }
 
 function deferred<T>() {
@@ -255,6 +259,9 @@ export class PiRpcConnection implements AgentConnection {
           "Pi resume requires its native session file; pi-acp ids cannot be migrated automatically",
         );
       }
+      // Pi opens a missing path as a new empty session under that name.
+      if (!existsSync(request.sessionId))
+        throw new Error(`Pi session file not found: ${request.sessionId}`);
       await this.host.configureMcp(request.mcpServers ?? []);
       this.steerCommand = "";
       const result = z.object({ cancelled: z.boolean() }).parse(
@@ -328,16 +335,12 @@ export class PiRpcConnection implements AgentConnection {
     for (const entry of branch) {
       const user = userEntrySchema.safeParse(entry);
       if (user.success) {
-        const text = userText(
+        for (const content of userContent(
           "message" in user.data
             ? user.data.message.content
             : user.data.content,
-        );
-        if (text)
-          await this.update({
-            sessionUpdate: "user_message_chunk",
-            content: { type: "text", text },
-          });
+        ))
+          await this.update({ sessionUpdate: "user_message_chunk", content });
         continue;
       }
       const assistant = assistantEntrySchema.safeParse(entry);

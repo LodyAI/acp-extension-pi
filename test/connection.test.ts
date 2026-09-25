@@ -1,13 +1,20 @@
 import { QUESTION_PREFIX } from "../src/builtin-tools.js";
 import type { PiStream } from "../src/types.js";
-import { resolve } from "node:path";
-import { describe, expect, it } from "vitest";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
+import { afterAll, describe, expect, it } from "vitest";
 import type * as acp from "@agentclientprotocol/sdk";
 import { PiRpcConnection, initializeResponse } from "../src/connection.js";
 import {
   LODY_EXTENSION_METHODS,
   type SessionUsageUpdate,
 } from "acp-extension-core";
+
+const nativeDirectory = mkdtempSync(join(tmpdir(), "lody-pi-connection-"));
+const nativeSession = join(nativeDirectory, "pi-session.jsonl");
+writeFileSync(nativeSession, "");
+afterAll(() => rmSync(nativeDirectory, { recursive: true, force: true }));
 
 function deferred<T = void>() {
   let resolve!: (value: T) => void;
@@ -44,7 +51,7 @@ function peer() {
   const accepted = deferred();
   const questionAnswered = deferred<Record<string, unknown>>();
   const state = {
-    sessionFile: "/work/pi-session.jsonl",
+    sessionFile: nativeSession,
     model,
     thinkingLevel: "off",
   };
@@ -257,7 +264,7 @@ async function start(p: ReturnType<typeof peer>) {
   return p.client.newSession({ cwd: "/work", mcpServers: [] });
 }
 const prompt = {
-  sessionId: "/work/pi-session.jsonl",
+  sessionId: nativeSession,
   prompt: [{ type: "text" as const, text: "hello" }],
 };
 const text = (value: string) => ({
@@ -1132,6 +1139,14 @@ describe("native Pi connection", () => {
         mcpServers: [],
       }),
     ).rejects.toThrow("native session file");
+    const missing = join(nativeDirectory, "deleted.jsonl");
+    for (const open of ["resumeSession", "loadSession"] as const)
+      await expect(
+        p.client[open]({ sessionId: missing, cwd: "/work", mcpServers: [] }),
+      ).rejects.toThrow("session file not found");
+    expect(p.commands.filter((c) => c.type === "switch_session")).toHaveLength(
+      1,
+    );
     p.close();
   });
 
@@ -1150,7 +1165,13 @@ describe("native Pi connection", () => {
       p.reply(request, {
         leafId: "a3",
         entries: [
-          message("u1", null, { role: "user", content: "hello" }),
+          message("u1", null, {
+            role: "user",
+            content: [
+              { type: "text", text: "hello" },
+              { type: "image", data: "aW1n", mimeType: "image/png" },
+            ],
+          }),
           message("abandoned", "u1", {
             role: "assistant",
             content: [{ type: "text", text: "old branch" }],
@@ -1238,6 +1259,10 @@ describe("native Pi connection", () => {
       {
         sessionUpdate: "user_message_chunk",
         content: { type: "text", text: "hello" },
+      },
+      {
+        sessionUpdate: "user_message_chunk",
+        content: { type: "image", data: "aW1n", mimeType: "image/png" },
       },
       {
         sessionUpdate: "agent_thought_chunk",
