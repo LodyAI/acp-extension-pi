@@ -40,7 +40,10 @@ workspace packages or reimplement Pi's executor.
 - Steering uses native custom-message metadata, never matching text. Emit the Core
   applied notification before later output; Lody owns its application barrier.
 - Keep diagnostics separate from model outcomes. Preserve native error, length
-  and cancellation results. Pi stats own usage and context occupancy.
+  and cancellation results. Pi stats own context occupancy only: they sum the
+  current context, drop with compaction/retry and restore history on resume.
+  Usage is live per-response `message.usage` (main, compaction summary, subagent
+  children) in a Core accumulator scoped per activation; never seed it from stats.
 - stdout is protocol only; diagnostics go to stderr. On Unix, normal connection
   close requests Pi cleanup and terminates its process group; subagents remain
   in that group. V1 accepts that detached shell commands may survive a Pi hard

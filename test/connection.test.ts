@@ -256,6 +256,21 @@ const text = (value: string) => ({
   type: "message_update",
   assistantMessageEvent: { type: "text_delta", delta: value },
 });
+/** Accounting fields Pi puts on every assistant message. */
+const response = (responseId: string, extra: Record<string, unknown> = {}) => ({
+  role: "assistant",
+  provider: "fixture",
+  model: "one",
+  responseId,
+  timestamp: 1,
+  usage,
+  ...extra,
+});
+const lodyEvent = (payload: Record<string, unknown>) => ({
+  type: "extension_ui_request",
+  method: "notify",
+  message: "lody-rpc:" + JSON.stringify(payload),
+});
 
 describe("native Pi connection", () => {
   it.each(["reply-error", "eof"])(
@@ -779,7 +794,7 @@ describe("native Pi connection", () => {
     },
   );
 
-  it("keeps tool generation distinct from execution, reads cumulative session usage, and waits through retry to settled", async () => {
+  it("keeps tool generation distinct from execution, accounts every response, and waits through retry to settled", async () => {
     const p = peer();
     await start(p);
     const done = p.client.prompt(prompt);
@@ -805,12 +820,10 @@ describe("native Pi connection", () => {
     p.emit({ ...text(" attempt"), usage });
     p.emit({
       type: "message_end",
-      message: {
-        role: "assistant",
+      message: response("r1", {
         stopReason: "error",
         errorMessage: "retryable",
-        usage,
-      },
+      }),
     });
     p.emit({ type: "agent_end", willRetry: true });
     p.emit({
@@ -824,7 +837,7 @@ describe("native Pi connection", () => {
     p.emit(text("recovered"));
     p.emit({
       type: "message_end",
-      message: { role: "assistant", stopReason: "stop", usage },
+      message: response("r2", { stopReason: "stop" }),
     });
     p.emit({ type: "auto_retry_end", success: true, attempt: 1 });
     p.emit({ type: "compaction_start", reason: "threshold" });
@@ -876,7 +889,9 @@ describe("native Pi connection", () => {
       status: "completed",
       rawOutput: { content: [{ type: "text", text: "edited" }] },
     });
-    expect(p.usages.at(-1)?.usage).toEqual({
+    // The failed attempt spent tokens too; each response counts once.
+    expect(p.usages.map((u) => u.delta?.usage.inputTokens)).toEqual([10, 10]);
+    expect(p.usages.at(-1)?.modelUsage?.["fixture/one"]).toMatchObject({
       inputTokens: 20,
       outputTokens: 10,
       cacheReadInputTokens: 4,
@@ -1127,7 +1142,7 @@ describe("native Pi connection", () => {
     p.close();
   });
 
-  it("compacts with custom instructions and reports activity plus the final usage snapshot", async () => {
+  it("compacts with custom instructions and accounts the summary call on the session model", async () => {
     const p = peer();
     await start(p);
     p.setCompact((request) => {
@@ -1137,7 +1152,11 @@ describe("native Pi connection", () => {
         reason: "manual",
         aborted: false,
         willRetry: false,
-        result: { tokensBefore: 2000, estimatedTokensAfter: 200 },
+        result: {
+          tokensBefore: 2000,
+          estimatedTokensAfter: 200,
+          usage: { ...usage, input: 1500, cost: { total: 0.03 } },
+        },
       });
       p.reply(request, { summary: "synthetic" });
     });
@@ -1174,7 +1193,11 @@ describe("native Pi connection", () => {
         },
       },
     ]);
-    expect(p.usages.at(-1)?.usage.costUSD).toBe(0.03);
+    // No response ran yet in this activation, so the configured model is used.
+    expect(p.usages.at(-1)?.modelUsage?.["fixture/one"]).toMatchObject({
+      inputTokens: 1500,
+      costUSD: 0.03,
+    });
     expect(
       p.updates.filter((n) => n.update.sessionUpdate === "usage_update"),
     ).toEqual([]);
@@ -1271,7 +1294,61 @@ describe("native Pi connection", () => {
     p.close();
   });
 
-  it("advertises usage and refreshes authoritative snapshots across resume and model changes", async () => {
+  it("scopes live per-response usage per activation, with subagents and model provenance", async () => {
+    const p = peer();
+    await start(p);
+    p.setPrompt((request) => {
+      p.emit({ type: "agent_start" });
+      p.emit({
+        type: "message_end",
+        message: response("a", { stopReason: "stop" }),
+      });
+      p.emit(
+        lodyEvent({
+          type: "lody_usage",
+          taskId: "task-1",
+          message: response("child", { provider: "other", model: "mini" }),
+        }),
+      );
+      // A repeated report of one response merges instead of adding.
+      p.emit({
+        type: "message_end",
+        message: response("a", { stopReason: "stop" }),
+      });
+      p.finish();
+      p.reply(request);
+    });
+    await expect(p.client.prompt(prompt)).resolves.toEqual({
+      stopReason: "end_turn",
+    });
+    expect(p.usages).toHaveLength(2);
+    expect(p.usages[1]?.modelUsage).toMatchObject({
+      "fixture/one": { inputTokens: 10, outputTokens: 5 },
+      "other/mini": { inputTokens: 10 },
+    });
+    expect(p.usages[1]?.delta?.modelUsage).toMatchObject({
+      "fixture/one": { inputTokens: 0 },
+      "other/mini": { inputTokens: 10 },
+    });
+    const firstScope = p.usages[0]?._meta?.lody?.usageScopeId;
+    expect(p.usages[1]?._meta?.lody?.usageScopeId).toBe(firstScope);
+
+    // A resumed activation counts only live responses, under a new scope.
+    await p.client.resumeSession({
+      sessionId: prompt.sessionId,
+      cwd: "/work",
+      mcpServers: [],
+    });
+    await expect(p.client.prompt(prompt)).resolves.toEqual({
+      stopReason: "end_turn",
+    });
+    const resumed = p.usages.at(-1);
+    expect(resumed?._meta?.lody?.usageScopeId).not.toBe(firstScope);
+    expect(resumed?.modelUsage?.["fixture/one"]?.inputTokens).toBe(10);
+    p.close();
+  });
+
+  it("keeps stats for context occupancy only, never replaying resumed history as usage", async () => {
     const p = peer();
     let input = 20;
     p.setStats((request) =>
@@ -1299,12 +1376,9 @@ describe("native Pi connection", () => {
       configId: "model",
       value: "fixture/two",
     });
-    expect(p.usages.map((value) => value.usage.inputTokens)).toEqual([
-      20, 20, 30,
-    ]);
-    // An explicit empty breakdown prevents a host from assigning the cumulative
-    // multi-model and compaction total to whichever model is selected now.
-    expect(p.usages.map((value) => value.modelUsage)).toEqual([{}, {}, {}]);
+    // Stats are a sum over the current context: after resume they already hold
+    // history, and compaction or retries lower them. They never become usage.
+    expect(p.usages).toEqual([]);
     expect(p.updates.at(-1)?.update).toEqual({
       sessionUpdate: "usage_update",
       used: 64,

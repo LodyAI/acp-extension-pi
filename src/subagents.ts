@@ -194,6 +194,21 @@ export function registerSubagents(
               event.type === "message_end" &&
               event.message?.role === "assistant"
             ) {
+              // Child usage is live-only (--no-session); forward just its accounting fields.
+              const { provider, model, responseId, timestamp, usage } =
+                event.message;
+              emit(ctx, {
+                type: "lody_usage",
+                taskId: id,
+                message: {
+                  role: "assistant",
+                  provider,
+                  model,
+                  responseId,
+                  timestamp,
+                  usage,
+                },
+              });
               append("\n");
               failed = ["error", "aborted", "length"].includes(
                 event.message.stopReason,
