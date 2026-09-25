@@ -47,7 +47,8 @@ compatibility promise.
   history. Compaction summaries and other branches are not replayed. A missing
   session file fails resume/load instead of starting an empty session.
 - Acknowledged steering using acp-extension-core identity metadata.
-- Native usage/context snapshots, automatic compaction activity and /compact.
+- Per-response token usage by model (including compaction summaries and
+  subagents), native context snapshots, automatic compaction activity and /compact.
 - ACP-selected stdio MCP tools with text/image results and cancellation.
 - Questionnaire: one or more questions in Lody's existing question card.
 - Todo: list/add/toggle/clear through Lody's existing checklist.

@@ -6,11 +6,19 @@ import { z } from "zod";
 
 import {
   LODY_EXTENSION_METHODS,
+  SessionUsageAccumulator,
   type LodyActivityMeta,
   type SessionUsageUpdate,
 } from "acp-extension-core";
 import type { AgentConnection, PiStream } from "./types.js";
 import { PiTransport } from "./transport.js";
+import {
+  piAssistantUsageSchema,
+  piModelKey,
+  piResponseOperation,
+  piUsageSchema,
+  toModelUsage,
+} from "./usage.js";
 import { PI_RPC_VERSION } from "./version.js";
 import { QUESTION_PREFIX, questionsSchema } from "./builtin-tools.js";
 
@@ -185,6 +193,12 @@ export class PiRpcConnection implements AgentConnection {
     ReturnType<typeof deferred<unknown>>
   >();
   private pendingPlan?: acp.PlanEntry[];
+  /** Live per-response usage of this activation. Pi stats are a sum over the
+   * current context, not a counter: compaction, retries and branching lower them
+   * and resume restores history, so they never feed accounting. */
+  private usageLedger = new SessionUsageAccumulator();
+  private compactions = 0;
+  private lastModelKey?: string;
   private steerCommand = "";
   private pendingSteer?: {
     id: string;
@@ -296,6 +310,8 @@ export class PiRpcConnection implements AgentConnection {
     if (!state.sessionFile)
       throw new Error("Pi did not provide a persistent session file");
     this.sessionId = state.sessionFile;
+    // A new or resumed activation starts a new usage scope from zero.
+    this.usageLedger = new SessionUsageAccumulator();
     await this.rpc.drain();
     if (replay) {
       // Replay carries every todo snapshot at its original position instead.
@@ -736,6 +752,18 @@ export class PiRpcConnection implements AgentConnection {
         else await this.update({ sessionUpdate: "plan", entries });
         return;
       }
+      if (payload.type === "lody_usage") {
+        const usage = z
+          .object({ taskId: z.string(), message: piAssistantUsageSchema })
+          .safeParse(payload);
+        if (usage.success)
+          this.recordUsage(
+            `subagent:${usage.data.taskId}:${piResponseOperation(usage.data.message)}`,
+            piModelKey(usage.data.message.provider, usage.data.message.model),
+            usage.data.message.usage,
+          );
+        return;
+      }
       if (payload.type === "lody_subagent") {
         const task = z
           .object({
@@ -900,6 +928,19 @@ export class PiRpcConnection implements AgentConnection {
           })
           .parse(event.message);
         if (message.role !== "assistant") break;
+        // Errored and aborted responses still spent the tokens they report.
+        const response = piAssistantUsageSchema.safeParse(event.message);
+        if (response.success) {
+          this.lastModelKey = piModelKey(
+            response.data.provider,
+            response.data.model,
+          );
+          this.recordUsage(
+            `message:${piResponseOperation(response.data)}`,
+            this.lastModelKey,
+            response.data.usage,
+          );
+        }
         if (message.stopReason === "error")
           run.error = message.errorMessage ?? "Pi model request failed";
         if (message.stopReason === "aborted") run.cancelled = true;
@@ -927,9 +968,27 @@ export class PiRpcConnection implements AgentConnection {
           .object({
             tokensBefore: z.number().nonnegative().optional(),
             estimatedTokensAfter: z.number().nonnegative().optional(),
+            usage: piUsageSchema.optional(),
           })
           .optional()
           .parse(event.result);
+        // Pi reports the summary call's usage without its model; it runs on the
+        // session model: the latest response's, else the configured one.
+        if (result?.usage) {
+          const model =
+            this.lastModelKey ??
+            (await this.readState().then(
+              (state) =>
+                state.model && piModelKey(state.model.provider, state.model.id),
+              () => undefined,
+            ));
+          if (model)
+            this.recordUsage(
+              `compaction:${++this.compactions}`,
+              model,
+              result.usage,
+            );
+        }
         await this.endActivity(
           run,
           "summaryRetry",
@@ -1044,10 +1103,21 @@ export class PiRpcConnection implements AgentConnection {
     });
   }
 
+  private recordUsage(
+    operationId: string,
+    model: string,
+    usage: z.infer<typeof piUsageSchema>,
+  ): void {
+    if (!this.sessionId) return;
+    const update = this.usageLedger.update(this.sessionId, operationId, {
+      [model]: toModelUsage(usage),
+    });
+    if (update) this.host.usage(update);
+  }
+
+  /** Context occupancy and the /status text come from Pi stats; accounting does not. */
   private async reportUsage() {
     const sessionId = this.sessionId;
-    // Pi owns the cumulative session total, including compaction and native resume.
-    // Never feed per-message snapshots into the host's session-snapshot channel.
     const parsed = statsSchema.safeParse(
       await this.rpc.request("get_session_stats").catch(() => {
         // An unavailable snapshot is optional; a failed connection is not,
@@ -1063,20 +1133,7 @@ export class PiRpcConnection implements AgentConnection {
       !this.steerCommand
     )
       return;
-    const { tokens, cost, contextUsage } = parsed.data;
-    this.host.usage({
-      sessionId,
-      usage: {
-        inputTokens: tokens.input,
-        outputTokens: tokens.output,
-        cacheReadInputTokens: tokens.cacheRead,
-        cacheCreationInputTokens: tokens.cacheWrite,
-        costUSD: cost,
-      },
-      // Pi totals include tool and summary usage without model provenance. Omitting
-      // this field makes Lody attribute the entire total to the current model.
-      modelUsage: {},
-    });
+    const { contextUsage } = parsed.data;
     if (contextUsage?.tokens != null)
       await this.update({
         sessionUpdate: "usage_update",

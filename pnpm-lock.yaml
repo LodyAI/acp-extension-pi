@@ -17,8 +17,8 @@ importers:
         specifier: 1.29.0
         version: 1.29.0(zod@4.3.6)
       acp-extension-core:
-        specifier: 0.1.0
-        version: 0.1.0
+        specifier: 0.1.8
+        version: 0.1.8
       zod:
         specifier: 4.3.6
         version: 4.3.6
@@ -943,10 +943,10 @@ packages:
       }
     engines: { node: ">= 0.6" }
 
-  acp-extension-core@0.1.0:
+  acp-extension-core@0.1.8:
     resolution:
       {
-        integrity: sha512-otUAYPQQrHWk348jB+WW0/0XCajqFqqPRGh5BdhH3nc1Ayma1j3pFyscXXASgBekor4rlxsBRd98KSfn3ede8g==,
+        integrity: sha512-ngcIWck9aEN4i/OxnRgNiBPWFEFc3EXjcjPKoT8KHBZj+AgFjiX0Uc6t/WEK48JAnLc9M7fUAjzOBb2PangGug==,
       }
 
   agent-base@7.1.4:
@@ -3013,7 +3013,7 @@ snapshots:
       mime-types: 3.0.2
       negotiator: 1.1.0
 
-  acp-extension-core@0.1.0: {}
+  acp-extension-core@0.1.8: {}
 
   agent-base@7.1.4: {}
 
