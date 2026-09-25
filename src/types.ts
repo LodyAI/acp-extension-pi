@@ -4,6 +4,7 @@ export type AgentConnection = Pick<
   | "initialize"
   | "newSession"
   | "resumeSession"
+  | "loadSession"
   | "prompt"
   | "cancel"
   | "setSessionConfigOption"

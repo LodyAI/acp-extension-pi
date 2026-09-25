@@ -143,7 +143,12 @@ const execFileAsync = promisify(execFile);
 const entry =
   process.argv[2] ??
   fileURLToPath(new URL("../dist/index.js", import.meta.url));
-async function start(sessionId, extensionPaths = [], provider = "localtest") {
+async function start(
+  sessionId,
+  extensionPaths = [],
+  provider = "localtest",
+  open = "resumeSession",
+) {
   const child = spawn(
     process.execPath,
     [
@@ -191,7 +196,7 @@ async function start(sessionId, extensionPaths = [], provider = "localtest") {
     },
   ];
   const result = sessionId
-    ? await client.resumeSession({ sessionId, cwd: root, mcpServers })
+    ? await client[open]({ sessionId, cwd: root, mcpServers })
     : await client.newSession({ cwd: root, mcpServers });
   const id = result.sessionId ?? sessionId;
   return {
@@ -354,6 +359,39 @@ try {
   await a.prompt("RECOVER_TEST");
   const id = a.id;
   await a.close();
+  const beforeLoad = updates.length;
+  const loaded = await start(id, [], "localtest", "loadSession");
+  const { sessions } = await loaded.client.listSessions({ cwd: root });
+  assert.ok(sessions.some((session) => session.sessionId === id));
+  const replay = updates.slice(beforeLoad);
+  assert.ok(
+    !replay.some(
+      (update) =>
+        update.sessionUpdate === "user_message_chunk" &&
+        update.content.text.startsWith("/lody-steer-"),
+    ),
+  );
+  assert.ok(
+    replay.some(
+      (update) =>
+        update.sessionUpdate === "user_message_chunk" &&
+        update.content.text === "MCP_TEST",
+    ),
+  );
+  assert.ok(
+    replay.some(
+      (update) =>
+        update.title === "mcp_fixture_error" && update.status === "failed",
+    ),
+  );
+  assert.ok(
+    replay.some(
+      (update) =>
+        update.sessionUpdate === "plan" &&
+        update.entries.some((item) => item.content === "Verify native adapter"),
+    ),
+  );
+  await loaded.close();
   const before = updates.length;
   const b = await start(id);
   assert.ok(
@@ -578,7 +616,7 @@ try {
     assert.ok(!names.includes("questionnaire") && !names.includes("subagent"));
   }
   console.log(
-    "Native Pi V1 smoke passed: questions, todo/resume, subagent lifecycle/output/cancel, Stop/recovery, ambient exclusion and explicit extension opt-in",
+    "Native Pi V1 smoke passed: questions, todo/resume, session list/load, subagent lifecycle/output/cancel, Stop/recovery, ambient exclusion and explicit extension opt-in",
   );
 } finally {
   clearTimeout(deadline);
