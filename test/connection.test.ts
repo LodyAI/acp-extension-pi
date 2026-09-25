@@ -1252,7 +1252,7 @@ describe("native Pi connection", () => {
         toolCallId: "t1",
         kind: "read",
         status: "completed",
-        locations: [{ path: "/work/a.ts" }],
+        locations: [{ path: resolve("/work", "a.ts") }],
         content: [{ type: "content", content: { type: "text", text: "file" } }],
       }),
       expect.objectContaining({

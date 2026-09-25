@@ -7,17 +7,24 @@ export async function listPiSessions(
 ): Promise<acp.ListSessionsResponse> {
   const { SessionManager, SettingsManager } =
     await import("@earendil-works/pi-coding-agent");
-  // Pi runs in, records and files sessions under the resolved working directory.
-  const cwd = await realpath(request.cwd ?? process.cwd());
+  const cwd = request.cwd ?? process.cwd();
   // Same precedence as the Pi CLI started by this adapter (it passes no --session-dir).
   const sessionDir =
     process.env.PI_CODING_AGENT_SESSION_DIR ||
     SettingsManager.create(cwd).getSessionDir();
+  // Pi records process.cwd(): symlink-resolved on POSIX, as spawned on Windows.
   const sessions = request.cwd
-    ? await SessionManager.list(cwd, sessionDir)
+    ? (
+        await Promise.all(
+          [...new Set([cwd, await realpath(cwd)])].map((candidate) =>
+            SessionManager.list(candidate, sessionDir),
+          ),
+        )
+      ).flat()
     : await SessionManager.listAll(sessionDir);
+  const byPath = new Map(sessions.map((session) => [session.path, session]));
   return {
-    sessions: sessions.map((session) => ({
+    sessions: [...byPath.values()].map((session) => ({
       sessionId: session.path,
       cwd: session.cwd || cwd,
       title: session.name || session.firstMessage || null,

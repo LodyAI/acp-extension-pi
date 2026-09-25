@@ -48,7 +48,9 @@ const user = (id: string, content: string) => ({
 
 describe("native Pi session listing", () => {
   it("lists the configured directory's sessions for one resolved cwd by native file path", async () => {
-    directory = realpathSync(mkdtempSync(join(tmpdir(), "lody-pi-sessions-")));
+    directory = realpathSync.native(
+      mkdtempSync(join(tmpdir(), "lody-pi-sessions-")),
+    );
     process.env.PI_CODING_AGENT_SESSION_DIR = directory;
     const work = join(directory, "work");
     mkdirSync(work);
