@@ -365,6 +365,13 @@ try {
   assert.ok(sessions.some((session) => session.sessionId === id));
   const replay = updates.slice(beforeLoad);
   assert.ok(
+    !replay.some(
+      (update) =>
+        update.sessionUpdate === "user_message_chunk" &&
+        update.content.text.startsWith("/lody-steer-"),
+    ),
+  );
+  assert.ok(
     replay.some(
       (update) =>
         update.sessionUpdate === "user_message_chunk" &&
