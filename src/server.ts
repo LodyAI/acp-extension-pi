@@ -17,6 +17,7 @@ import {
 import { PiRpcConnection, initializeResponse } from "./connection.js";
 import { PI_EXTENSIONS_ENV, parsePiLaunchArgs } from "./extensions.js";
 import { MCP_CONFIG_ENV } from "./mcp.js";
+import { listPiSessions } from "./sessions.js";
 
 const SHUTDOWN_GRACE_MS = 1_000;
 
@@ -206,6 +207,11 @@ export function serve(stream: Stream, piArgs: string[] = []) {
         validate(request);
         return (await get(request.cwd)).resumeSession(request);
       },
+      loadSession: async (request) => {
+        validate(request);
+        return (await get(request.cwd)).loadSession(request);
+      },
+      listSessions: listPiSessions,
       prompt: async (request) => (await get()).prompt(request),
       cancel: async (request) => {
         await (await get()).cancel(request);

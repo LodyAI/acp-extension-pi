@@ -99,6 +99,8 @@ function peer() {
   };
   let onModels = (request: Record<string, unknown>) =>
     reply(request, { models: [model, { ...model, id: "two" }] });
+  let onEntries = (request: Record<string, unknown>) =>
+    reply(request, { entries: [], leafId: null });
   const writable = new WritableStream<Uint8Array>({
     write(bytes) {
       const request: Record<string, unknown> = JSON.parse(
@@ -140,6 +142,9 @@ function peer() {
           break;
         case "set_model":
           onModel(request);
+          break;
+        case "get_entries":
+          onEntries(request);
           break;
         case "set_thinking_level":
           state.thinkingLevel = String(request.level);
@@ -213,6 +218,9 @@ function peer() {
     },
     setModels(handler: typeof onModels) {
       onModels = handler;
+    },
+    setEntries(handler: typeof onEntries) {
+      onEntries = handler;
     },
     get client() {
       return (client ??= new PiRpcConnection(stream, host));
@@ -1124,6 +1132,149 @@ describe("native Pi connection", () => {
         mcpServers: [],
       }),
     ).rejects.toThrow("native session file");
+    p.close();
+  });
+
+  it("loads a native file by replaying only its current branch", async () => {
+    const p = peer();
+    const entry = (id: string, parentId: string | null, fields: object) => ({
+      id,
+      parentId,
+      timestamp: "2026-01-01T00:00:00.000Z",
+      ...fields,
+    });
+    const message = (id: string, parentId: string | null, value: object) =>
+      entry(id, parentId, { type: "message", message: value });
+    const todos = [{ id: 1, text: "Ship", done: false }];
+    p.setEntries((request) =>
+      p.reply(request, {
+        leafId: "a3",
+        entries: [
+          message("u1", null, { role: "user", content: "hello" }),
+          message("abandoned", "u1", {
+            role: "assistant",
+            content: [{ type: "text", text: "old branch" }],
+          }),
+          message("a1", "u1", {
+            role: "assistant",
+            content: [
+              { type: "thinking", thinking: "look first" },
+              { type: "text", text: "Reading" },
+              {
+                type: "toolCall",
+                id: "t1",
+                name: "read",
+                arguments: { path: "a.ts" },
+              },
+              {
+                type: "toolCall",
+                id: "t2",
+                name: "todo",
+                arguments: { action: "add" },
+              },
+              {
+                type: "toolCall",
+                id: "t3",
+                name: "bash",
+                arguments: { command: "x" },
+              },
+            ],
+          }),
+          message("r1", "a1", {
+            role: "toolResult",
+            toolCallId: "t1",
+            toolName: "read",
+            content: [{ type: "text", text: "file" }],
+            isError: false,
+          }),
+          message("r2", "r1", {
+            role: "toolResult",
+            toolCallId: "t2",
+            toolName: "todo",
+            content: [{ type: "text", text: "{}" }],
+            details: { todos },
+            isError: false,
+          }),
+          entry("c1", "r2", {
+            type: "compaction",
+            summary: "internal",
+            firstKeptEntryId: "u1",
+            tokensBefore: 1,
+          }),
+          entry("s1", "c1", {
+            type: "custom_message",
+            customType: "lody-steer",
+            content: [{ type: "text", text: "also this" }],
+            display: true,
+          }),
+          message("a3", "s1", {
+            role: "assistant",
+            content: [{ type: "text", text: "Done" }],
+          }),
+        ],
+      }),
+    );
+    p.setSession((request) => {
+      p.reply(request, { cancelled: false });
+      // Native resume reconstructs the latest checklist before the replay starts.
+      p.emit({
+        type: "extension_ui_request",
+        method: "notify",
+        message: "lody-rpc:" + JSON.stringify({ type: "lody_todos", todos }),
+      });
+    });
+    await p.client.initialize({ protocolVersion: 1 });
+    const response = await p.client.loadSession({
+      sessionId: prompt.sessionId,
+      cwd: "/work",
+      mcpServers: [],
+    });
+    expect(response.configOptions).toBeDefined();
+    expect(p.commands.find((c) => c.type === "switch_session")).toMatchObject({
+      sessionPath: prompt.sessionId,
+    });
+    const plan = [{ content: "Ship", priority: "medium", status: "pending" }];
+    expect(p.updates.map((u) => u.update)).toEqual([
+      {
+        sessionUpdate: "user_message_chunk",
+        content: { type: "text", text: "hello" },
+      },
+      {
+        sessionUpdate: "agent_thought_chunk",
+        content: { type: "text", text: "look first" },
+      },
+      {
+        sessionUpdate: "agent_message_chunk",
+        content: { type: "text", text: "Reading" },
+      },
+      expect.objectContaining({
+        sessionUpdate: "tool_call",
+        toolCallId: "t1",
+        kind: "read",
+        status: "completed",
+        locations: [{ path: "/work/a.ts" }],
+        content: [{ type: "content", content: { type: "text", text: "file" } }],
+      }),
+      expect.objectContaining({
+        sessionUpdate: "tool_call",
+        toolCallId: "t2",
+        status: "completed",
+      }),
+      { sessionUpdate: "plan", entries: plan },
+      expect.objectContaining({
+        sessionUpdate: "tool_call",
+        toolCallId: "t3",
+        status: "failed",
+      }),
+      {
+        sessionUpdate: "user_message_chunk",
+        content: { type: "text", text: "also this" },
+      },
+      {
+        sessionUpdate: "agent_message_chunk",
+        content: { type: "text", text: "Done" },
+      },
+    ]);
     p.close();
   });
 

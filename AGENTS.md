@@ -37,6 +37,9 @@ workspace packages or reimplement Pi's executor.
 - Pi owns native session files. ACP identity is the native file path. Explicit
   new/resume and configuration exclude execution. Never silently follow another
   file or branch. Do not replay Lody history or add an identity map.
+  session/list reads Pi's native files without starting Pi. session/load
+  switches like resume, then replays only the current branch from Pi's entries
+  with Pi's tool call ids and each todo snapshot at its original position.
 - Steering uses native custom-message metadata, never matching text. Emit the Core
   applied notification before later output; Lody owns its application barrier.
 - Keep diagnostics separate from model outcomes. Preserve native error, length
@@ -59,7 +62,7 @@ workspace packages or reimplement Pi's executor.
   in private temporary files, never native history.
 - Use acp-extension-core contracts. Advertise only implemented capabilities.
   No permission modes, arbitrary plugin compatibility, TUI, Plan Mode, runtime
-  preset/tools plugins, detached subagent jobs or native history import in V1.
+  preset/tools plugins or detached subagent jobs in V1.
 - Tests use synthetic inputs and explicit signals, no real sleeps or commercial
   providers. Unit tests protect wire contracts; smoke drives the official CLI
   through a local deterministic model endpoint, with an opted-in synthetic

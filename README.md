@@ -41,7 +41,10 @@ compatibility promise.
 ## V1 capabilities
 
 - Native prompts, text/images, tool progress/results, model errors and cancellation.
-- Native file identity for explicit new/resume. No history replay or session-id map.
+- Native file identity for explicit new/resume/load. No session-id map.
+- Session list of native files for a working directory; load replays the
+  current branch's user, assistant, thinking, tool and todo history. Images,
+  compaction summaries and other branches are not replayed.
 - Acknowledged steering using acp-extension-core identity metadata.
 - Native usage/context snapshots, automatic compaction activity and /compact.
 - ACP-selected stdio MCP tools with text/image results and cancellation.

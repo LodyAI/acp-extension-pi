@@ -63,6 +63,73 @@ const questionSchema = z.object({
   method: z.string(),
   title: z.string().optional(),
 });
+const todosSchema = z.object({
+  todos: z.array(z.object({ text: z.string(), done: z.boolean() })),
+});
+const userContentSchema = z.union([
+  z.string(),
+  z.array(z.object({ type: z.string(), text: z.string().optional() })),
+]);
+const entriesSchema = z.object({
+  entries: z.array(
+    z.object({ id: z.string(), parentId: z.string().nullable() }).passthrough(),
+  ),
+  leafId: z.string().nullable(),
+});
+const userEntrySchema = z.union([
+  z.object({
+    type: z.literal("message"),
+    message: z.object({ role: z.literal("user"), content: userContentSchema }),
+  }),
+  z.object({
+    type: z.literal("custom_message"),
+    customType: z.literal("lody-steer"),
+    content: userContentSchema,
+  }),
+]);
+const assistantEntrySchema = z.object({
+  type: z.literal("message"),
+  message: z.object({
+    role: z.literal("assistant"),
+    content: z.array(z.unknown()),
+  }),
+});
+const assistantBlockSchema = z.union([
+  z.object({ type: z.literal("text"), text: z.string() }),
+  z.object({ type: z.literal("thinking"), thinking: z.string() }),
+  z.object({
+    type: z.literal("toolCall"),
+    id: z.string(),
+    name: z.string(),
+    arguments: z.record(z.string(), z.unknown()),
+  }),
+]);
+const toolResultEntrySchema = z.object({
+  type: z.literal("message"),
+  message: z.object({
+    role: z.literal("toolResult"),
+    toolCallId: z.string(),
+    content: contentSchema,
+    details: z.unknown().optional(),
+    isError: z.boolean().optional(),
+  }),
+});
+
+function planEntries({ todos }: z.infer<typeof todosSchema>): acp.PlanEntry[] {
+  return todos.map((todo) => ({
+    content: todo.text,
+    priority: "medium",
+    status: todo.done ? "completed" : "pending",
+  }));
+}
+
+function userText(content: z.infer<typeof userContentSchema>): string {
+  return typeof content === "string"
+    ? content
+    : content
+        .flatMap((block) => (block.type === "text" && block.text) || [])
+        .join("\n\n");
+}
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -166,7 +233,18 @@ export class PiRpcConnection implements AgentConnection {
     }, true);
   };
 
-  resumeSession: AgentConnection["resumeSession"] = async (request) => {
+  resumeSession: AgentConnection["resumeSession"] = (request) =>
+    this.open(request, false);
+
+  loadSession: AgentConnection["loadSession"] = async (request) => {
+    const { configOptions } = await this.open(request, true);
+    return { configOptions };
+  };
+
+  private open(
+    request: acp.ResumeSessionRequest,
+    replay: boolean,
+  ): Promise<acp.NewSessionResponse> {
     return this.configure(async () => {
       this.cwd = request.cwd;
       if (
@@ -187,14 +265,17 @@ export class PiRpcConnection implements AgentConnection {
       if (result.cancelled)
         throw new Error("Pi extension cancelled session resume");
       await this.initialize({ protocolVersion: 1 });
-      const response = await this.prepare(request._meta);
+      const response = await this.prepare(request._meta, replay);
       if (response.sessionId !== request.sessionId)
         throw new Error("Pi resumed a different session file");
       return response;
     }, true);
-  };
+  }
 
-  private async prepare(meta: unknown): Promise<acp.NewSessionResponse> {
+  private async prepare(
+    meta: unknown,
+    replay = false,
+  ): Promise<acp.NewSessionResponse> {
     const config = startupConfigSchema.safeParse(meta);
     if (config.success) {
       const values = config.data.lody.sessionConfig.configOptionValues;
@@ -209,13 +290,95 @@ export class PiRpcConnection implements AgentConnection {
       throw new Error("Pi did not provide a persistent session file");
     this.sessionId = state.sessionFile;
     await this.rpc.drain();
-    if (this.pendingPlan) {
+    if (replay) {
+      // Replay carries every todo snapshot at its original position instead.
+      this.pendingPlan = undefined;
+      await this.replayHistory();
+    } else if (this.pendingPlan) {
       await this.update({ sessionUpdate: "plan", entries: this.pendingPlan });
       this.pendingPlan = undefined;
     }
     const configOptions = await this.configOptions();
     await this.reportUsage();
     return { sessionId: this.sessionId, configOptions };
+  }
+
+  /** Replays the native branch Pi will continue from, using Pi's own tool call ids. */
+  private async replayHistory(): Promise<void> {
+    const { entries, leafId } = entriesSchema.parse(
+      await this.rpc.request("get_entries"),
+    );
+    const byId = new Map(entries.map((entry) => [entry.id, entry]));
+    const branch: typeof entries = [];
+    for (let id = leafId; id;) {
+      const entry = byId.get(id);
+      if (!entry) throw new Error(`Pi session entry is missing: ${id}`);
+      branch.unshift(entry);
+      id = entry.parentId;
+    }
+    const results = new Map<
+      string,
+      z.infer<typeof toolResultEntrySchema>["message"]
+    >();
+    for (const entry of branch) {
+      const result = toolResultEntrySchema.safeParse(entry);
+      if (result.success)
+        results.set(result.data.message.toolCallId, result.data.message);
+    }
+    for (const entry of branch) {
+      const user = userEntrySchema.safeParse(entry);
+      if (user.success) {
+        const text = userText(
+          "message" in user.data
+            ? user.data.message.content
+            : user.data.content,
+        );
+        if (text)
+          await this.update({
+            sessionUpdate: "user_message_chunk",
+            content: { type: "text", text },
+          });
+        continue;
+      }
+      const assistant = assistantEntrySchema.safeParse(entry);
+      if (!assistant.success) continue;
+      for (const raw of assistant.data.message.content) {
+        const parsed = assistantBlockSchema.safeParse(raw);
+        if (!parsed.success) continue;
+        const block = parsed.data;
+        if (block.type === "text" && block.text)
+          await this.update({
+            sessionUpdate: "agent_message_chunk",
+            content: { type: "text", text: block.text },
+          });
+        else if (block.type === "thinking" && block.thinking)
+          await this.update({
+            sessionUpdate: "agent_thought_chunk",
+            content: { type: "text", text: block.thinking },
+          });
+        else if (block.type === "toolCall") {
+          const result = results.get(block.id);
+          await this.update({
+            ...this.toolCall(
+              {
+                toolCallId: block.id,
+                toolName: block.name,
+                args: block.arguments,
+                result,
+              },
+              result && !result.isError ? "completed" : "failed",
+            ),
+            sessionUpdate: "tool_call",
+          });
+          const todos = todosSchema.safeParse(result?.details);
+          if (block.name === "todo" && todos.success)
+            await this.update({
+              sessionUpdate: "plan",
+              entries: planEntries(todos.data),
+            });
+        }
+      }
+    }
   }
 
   private async configOptions(
@@ -565,16 +728,7 @@ export class PiRpcConnection implements AgentConnection {
         return;
       }
       if (payload.type === "lody_todos") {
-        const { todos } = z
-          .object({
-            todos: z.array(z.object({ text: z.string(), done: z.boolean() })),
-          })
-          .parse(payload);
-        const entries: acp.PlanEntry[] = todos.map((todo) => ({
-          content: todo.text,
-          priority: "medium",
-          status: todo.done ? "completed" : "pending",
-        }));
+        const entries = planEntries(todosSchema.parse(payload));
         if (!this.sessionId) this.pendingPlan = entries;
         else await this.update({ sessionUpdate: "plan", entries });
         return;
@@ -945,6 +1099,27 @@ export class PiRpcConnection implements AgentConnection {
       .parse(event);
     const start = tool.type === "tool_execution_start";
     const end = tool.type === "tool_execution_end";
+    const notification = this.toolCall(
+      tool,
+      end ? (tool.isError ? "failed" : "completed") : "in_progress",
+    );
+    await this.update(
+      start
+        ? { ...notification, sessionUpdate: "tool_call" }
+        : { ...notification, sessionUpdate: "tool_call_update" },
+    );
+  }
+
+  private toolCall(
+    tool: {
+      toolCallId: string;
+      toolName: string;
+      args?: Record<string, unknown>;
+      result?: { content: z.infer<typeof contentSchema>; details?: unknown };
+      partialResult?: { content: z.infer<typeof contentSchema> };
+    },
+    status: acp.ToolCallStatus,
+  ): acp.ToolCall {
     const args = tool.args ?? {};
     const file =
       typeof args.path === "string"
@@ -961,11 +1136,11 @@ export class PiRpcConnection implements AgentConnection {
               ? "search"
               : "other";
     const content = tool.result?.content ?? tool.partialResult?.content;
-    const notification: acp.ToolCall = {
+    return {
       toolCallId: tool.toolCallId,
       title: tool.toolName,
       kind,
-      status: end ? (tool.isError ? "failed" : "completed") : "in_progress",
+      status,
       ...(tool.args
         ? {
             rawInput: {
@@ -991,11 +1166,6 @@ export class PiRpcConnection implements AgentConnection {
           }
         : {}),
     };
-    await this.update(
-      start
-        ? { ...notification, sessionUpdate: "tool_call" }
-        : { ...notification, sessionUpdate: "tool_call_update" },
-    );
   }
 
   private async question(
@@ -1280,7 +1450,8 @@ export function initializeResponse(): acp.InitializeResponse {
         },
       },
       promptCapabilities: { image: true, embeddedContext: true },
-      sessionCapabilities: { resume: {} },
+      loadSession: true,
+      sessionCapabilities: { resume: {}, list: {} },
     },
     authMethods: [],
   };
