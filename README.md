@@ -50,6 +50,10 @@ compatibility promise.
 - Per-response token usage by model (including compaction summaries and
   subagents), native context snapshots, automatic compaction activity and /compact.
 - ACP-selected stdio MCP tools with text/image results and cancellation.
+- MCP client negotiation for external stdio servers: a `server/discover` probe
+  selects the 2026-07-28 protocol when offered, then falls back to the supported
+  2025 `initialize` handshake for legacy servers. The probe may start one
+  short-lived sibling server process before the session connection.
 - Questionnaire: one or more questions in Lody's existing question card.
 - Todo: list/add/toggle/clear through Lody's existing checklist.
 - Subagent: native Lody task lifecycle, list, output and individual cancellation.
