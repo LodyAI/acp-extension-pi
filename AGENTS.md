@@ -27,6 +27,9 @@ workspace packages or reimplement Pi's executor.
   extension. They inherit model, thinking, cwd and the same explicit extension
   list, not the parent's MCP clients.
   Process-local task queries do not resume or replay a terminated child.
+- Negotiated Core subagent events replace legacy live task cards, not execution
+  ownership or billing. Stream child JSONL through the adapter; run IDs do not
+  authorize legacy task-ID controls. Keep non-negotiated clients compatible.
 - Ordinary prompt ACK means preflight passed, not completion. With only these
   packaged tools, agent_settled terminates native model work including retries and
   automatic compaction. Explicit compact waits for its own RPC response. Both

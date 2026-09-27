@@ -17,8 +17,8 @@ importers:
         specifier: 1.29.0
         version: 1.29.0(zod@4.3.6)
       acp-extension-core:
-        specifier: 0.1.8
-        version: 0.1.8
+        specifier: 0.1.9
+        version: 0.1.9(zod@4.3.6)
       zod:
         specifier: 4.3.6
         version: 4.3.6
@@ -44,6 +44,14 @@ packages:
     resolution:
       {
         integrity: sha512-i3h/efaeuMUFAO1HSfo97QZQnnvMd7wWBYtBsdL6UMZg3a78sk3Ffya5Xu7C7tYsXomXoDXJBAzQF2PcFKAhIQ==,
+      }
+    peerDependencies:
+      zod: ^3.25.0 || ^4.0.0
+
+  "@agentclientprotocol/sdk@1.4.0":
+    resolution:
+      {
+        integrity: sha512-/eufudw+aFY1LKLolT6yFE6UMmYRl7fMJ/DEONSIyR6wI3slHWITBsANRGqXEY8FRzqUxwh7QEaGiZHcJPVThg==,
       }
     peerDependencies:
       zod: ^3.25.0 || ^4.0.0
@@ -943,10 +951,10 @@ packages:
       }
     engines: { node: ">= 0.6" }
 
-  acp-extension-core@0.1.8:
+  acp-extension-core@0.1.9:
     resolution:
       {
-        integrity: sha512-ngcIWck9aEN4i/OxnRgNiBPWFEFc3EXjcjPKoT8KHBZj+AgFjiX0Uc6t/WEK48JAnLc9M7fUAjzOBb2PangGug==,
+        integrity: sha512-TH10B+4AfXDSjmvSNOOvAWfbDZeT5G8ngdilVjZ7RXvE4sw53IO/TzJokbzjIKaZzo51G4pGqElj9b9kPp7Rkg==,
       }
 
   agent-base@7.1.4:
@@ -2420,6 +2428,10 @@ snapshots:
     dependencies:
       zod: 4.3.6
 
+  "@agentclientprotocol/sdk@1.4.0(zod@4.3.6)":
+    dependencies:
+      zod: 4.3.6
+
   "@anthropic-ai/sdk@0.124.0(zod@4.3.6)":
     dependencies:
       json-schema-to-ts: 3.1.1
@@ -3013,7 +3025,11 @@ snapshots:
       mime-types: 3.0.2
       negotiator: 1.1.0
 
-  acp-extension-core@0.1.8: {}
+  acp-extension-core@0.1.9(zod@4.3.6):
+    dependencies:
+      "@agentclientprotocol/sdk": 1.4.0(zod@4.3.6)
+    transitivePeerDependencies:
+      - zod
 
   agent-base@7.1.4: {}
 

@@ -40,6 +40,14 @@ compatibility promise.
 
 ## V1 capabilities
 
+When both peers advertise `subagentEvents` v1, child JSONL text/thinking deltas,
+tool starts/results and lifecycle/progress feed Core `_lody/subagents/event`.
+Legacy task cards are suppressed for these runs; non-negotiated clients keep them.
+Children still cannot ask questions or spawn descendants. Existing task-ID
+list/output/cancel endpoints remain separate; normalized run controls are disabled.
+Core 0.1.9 supplies the contract and helper. A rebuilt, checksummed managed
+runtime is still required before this reaches Lody's installed Pi provider.
+
 - Native prompts, text/images, tool progress/results, model errors and cancellation.
 - Native file identity for explicit new/resume/load. No session-id map.
 - Session list of native files for a working directory; load replays the

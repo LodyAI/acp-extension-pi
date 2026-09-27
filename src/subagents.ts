@@ -89,6 +89,7 @@ export function registerSubagents(
       let forced: ReturnType<typeof setTimeout> | undefined;
       let failed = false;
       let buffer = "";
+      let messageId = randomUUID();
       let lastToolName: string | undefined;
       const info: LodySubagentTask = {
         taskId: id,
@@ -119,7 +120,12 @@ export function registerSubagents(
           ...(info.stopReason ? { error: info.stopReason } : {}),
           ...(lastToolName ? { lastToolName } : {}),
         };
-        emit(ctx, { type: "lody_subagent", event, task: meta });
+        emit(ctx, {
+          type: "lody_subagent",
+          event,
+          task: meta,
+          state: info.status,
+        });
       };
       const kill = (force: boolean) => {
         if (proc.exitCode !== null || proc.signalCode !== null || !proc.pid)
@@ -180,6 +186,22 @@ export function registerSubagents(
           if (!line.trim()) continue;
           try {
             const event = JSON.parse(line);
+            if (event.type === "message_start") messageId = randomUUID();
+            if (
+              [
+                "message_update",
+                "tool_execution_start",
+                "tool_execution_update",
+                "tool_execution_end",
+              ].includes(event.type)
+            ) {
+              emit(ctx, {
+                type: "lody_subagent_output",
+                taskId: id,
+                messageId,
+                event,
+              });
+            }
             if (
               event.type === "message_update" &&
               event.assistantMessageEvent?.type === "text_delta"
