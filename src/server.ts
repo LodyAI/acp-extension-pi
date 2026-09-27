@@ -13,6 +13,7 @@ import {
 import {
   LODY_EXTENSION_METHODS,
   normalizeLodyExtensionMethod,
+  supportsLodySubagentEvents,
 } from "acp-extension-core";
 import { PiRpcConnection, initializeResponse } from "./connection.js";
 import { PI_EXTENSIONS_ENV, parsePiLaunchArgs } from "./extensions.js";
@@ -43,6 +44,7 @@ export function serve(stream: Stream, piArgs: string[] = []) {
   const parsed = parsePiLaunchArgs(piArgs);
   let child: ChildProcess | undefined;
   let runtime: Promise<PiRpcConnection> | undefined;
+  let subagentEvents = false;
   let current: PiRpcConnection | undefined;
   let cwd: string | undefined;
   let closing: Promise<void> | undefined;
@@ -151,6 +153,7 @@ export function serve(stream: Stream, piArgs: string[] = []) {
           readable: Readable.toWeb(child.stdout!),
         },
         {
+          subagentEvents,
           configureMcp: async (servers) => {
             // Configuration exclusion keeps this write before the next runtime loads it.
             if (closing) throw new Error("ACP connection closed");
@@ -192,7 +195,10 @@ export function serve(stream: Stream, piArgs: string[] = []) {
         );
     };
     return {
-      initialize: async () => initializeResponse(),
+      initialize: async (request) => {
+        subagentEvents = supportsLodySubagentEvents(request.clientCapabilities);
+        return initializeResponse();
+      },
       authenticate: async () => {
         throw RequestError.invalidRequest(
           undefined,

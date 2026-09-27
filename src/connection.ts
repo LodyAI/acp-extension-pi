@@ -7,6 +7,8 @@ import { z } from "zod";
 import {
   LODY_EXTENSION_METHODS,
   SessionUsageAccumulator,
+  LodySubagentEmitter,
+  LODY_SUBAGENT_EVENT_METHOD,
   type LodyActivityMeta,
   type SessionUsageUpdate,
 } from "acp-extension-core";
@@ -171,6 +173,7 @@ type Run = Progress &
     accepted?: Promise<unknown>;
   };
 type Host = {
+  subagentEvents?: boolean;
   configureMcp: (servers: acp.McpServer[]) => Promise<void>;
   update: (notification: acp.SessionNotification) => Promise<void>;
   extension: (method: string, params: Record<string, unknown>) => Promise<void>;
@@ -182,6 +185,17 @@ type Host = {
 
 /** Translates the ACP control contract to the pinned Pi JSONL runtime. */
 export class PiRpcConnection implements AgentConnection {
+  private readonly subagentRuns = new Map<string, LodySubagentEmitter>();
+  private subagents(): LodySubagentEmitter {
+    let runs = this.subagentRuns.get(this.sessionId);
+    if (!runs) {
+      runs = new LodySubagentEmitter(this.sessionId, (event) =>
+        this.host.extension(LODY_SUBAGENT_EVENT_METHOD, { ...event }),
+      );
+      this.subagentRuns.set(this.sessionId, runs);
+    }
+    return runs;
+  }
   private readonly rpc: PiTransport;
   private sessionId = "";
   private cwd = "";
@@ -214,6 +228,8 @@ export class PiRpcConnection implements AgentConnection {
       stream,
       (event) => this.event(event),
       (error) => {
+        for (const runs of this.subagentRuns.values())
+          void runs.disconnect().catch(() => undefined);
         this.questions.clear();
         this.active?.reject(error);
         this.active?.settled.reject(error);
@@ -773,6 +789,51 @@ export class PiRpcConnection implements AgentConnection {
           })
           .passthrough()
           .parse(payload.task);
+        if (this.host.subagentEvents && this.sessionId) {
+          const runs = this.subagents();
+          if (payload.event === "started") {
+            await runs.start(task.taskId, {
+              state: "running",
+              parentRunId: null,
+              description: task.description,
+              ...(typeof task.parentToolCallId === "string"
+                ? { parentToolCallId: task.parentToolCallId }
+                : {}),
+              ...(typeof task.modelId === "string"
+                ? { modelId: task.modelId }
+                : {}),
+              ...(typeof task.startedAtEpochSeconds === "number"
+                ? { startedAtEpochSeconds: task.startedAtEpochSeconds }
+                : {}),
+              support: {
+                stream: ["text", "thought", "tool"],
+                progress: true,
+                outputRead: "none",
+                cancel: false,
+              },
+            });
+          }
+          if (typeof task.lastToolName === "string")
+            await runs.progress(task.taskId, {
+              lastToolName: task.lastToolName,
+            });
+          if (task.status !== "in_progress")
+            await runs.snapshot(task.taskId, {
+              state: payload.state === "killed" ? "cancelled" : task.status,
+              ...(typeof task.endedAtEpochSeconds === "number"
+                ? { endedAtEpochSeconds: task.endedAtEpochSeconds }
+                : {}),
+              ...(typeof task.error === "string"
+                ? {
+                    reason: {
+                      code: payload.state === "killed" ? "cancelled" : "error",
+                      message: task.error,
+                    },
+                  }
+                : {}),
+            });
+          return;
+        }
         await this.update({
           sessionUpdate:
             payload.event === "started" ? "tool_call" : "tool_call_update",
@@ -781,6 +842,40 @@ export class PiRpcConnection implements AgentConnection {
           status: task.status,
           _meta: { lody: { task } },
         });
+        return;
+      }
+      if (payload.type === "lody_subagent_output") {
+        if (
+          !this.host.subagentEvents ||
+          !this.sessionId ||
+          typeof payload.taskId !== "string"
+        )
+          return;
+        const childEvent = z
+          .record(z.string(), z.unknown())
+          .parse(payload.event);
+        const runs = this.subagents();
+        if (childEvent.type === "message_update") {
+          const delta = z
+            .object({ type: z.string(), delta: z.string().optional() })
+            .parse(childEvent.assistantMessageEvent);
+          if (delta.type === "text_delta" || delta.type === "thinking_delta")
+            await runs.output(
+              payload.taskId,
+              {
+                sessionUpdate:
+                  delta.type === "text_delta"
+                    ? "agent_message_chunk"
+                    : "agent_thought_chunk",
+                content: { type: "text", text: delta.delta ?? "" },
+              },
+              typeof payload.messageId === "string"
+                ? { messageId: payload.messageId }
+                : {},
+            );
+        } else {
+          await this.tool(childEvent, payload.taskId);
+        }
         return;
       }
       event = z
@@ -1143,7 +1238,10 @@ export class PiRpcConnection implements AgentConnection {
     return parsed.data;
   }
 
-  private async tool(event: Record<string, unknown>): Promise<void> {
+  private async tool(
+    event: Record<string, unknown>,
+    childId?: string,
+  ): Promise<void> {
     const tool = z
       .object({
         type: z.string(),
@@ -1157,13 +1255,19 @@ export class PiRpcConnection implements AgentConnection {
         isError: z.boolean().optional(),
       })
       .parse(event);
+    if (!childId && this.host.subagentEvents && tool.toolName === "subagent")
+      return;
     const start = tool.type === "tool_execution_start";
     const end = tool.type === "tool_execution_end";
     const notification = this.toolCall(
       tool,
       end ? (tool.isError ? "failed" : "completed") : "in_progress",
     );
-    await this.update(
+    const publish = childId
+      ? (update: acp.SessionNotification["update"]) =>
+          this.subagents().output(childId, update)
+      : (update: acp.SessionNotification["update"]) => this.update(update);
+    await publish(
       start
         ? { ...notification, sessionUpdate: "tool_call" }
         : { ...notification, sessionUpdate: "tool_call_update" },
@@ -1493,6 +1597,7 @@ export function initializeResponse(): acp.InitializeResponse {
       _meta: {
         lody: {
           usage: { version: 1 },
+          subagentEvents: { version: 1 },
           compaction: { version: 1 },
           subagents: {
             version: 1,

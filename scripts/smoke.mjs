@@ -9,7 +9,10 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { Readable, Writable } from "node:stream";
 import { ClientSideConnection, ndJsonStream } from "@agentclientprotocol/sdk";
-import { LODY_EXTENSION_METHODS } from "acp-extension-core";
+import {
+  LODY_EXTENSION_METHODS,
+  isLodySubagentEvent,
+} from "acp-extension-core";
 
 // Real official CLI and packaged extensions, with a local deterministic model.
 // The baseline phase uses no external provider plugin or alternate runtime.
@@ -148,7 +151,9 @@ async function start(
   extensionPaths = [],
   provider = "localtest",
   open = "resumeSession",
+  subagentEvents = false,
 ) {
+  const runEvents = [];
   const child = spawn(
     process.execPath,
     [
@@ -179,11 +184,18 @@ async function start(
       },
       unstable_createElicitation: (request) => answer(request),
       requestPermission: async () => ({ outcome: { outcome: "cancelled" } }),
-      extNotification: async () => {},
+      extNotification: async (_method, params) => {
+        if (isLodySubagentEvent(params)) runEvents.push(params);
+      },
     }),
     ndJsonStream(Writable.toWeb(child.stdin), Readable.toWeb(child.stdout)),
   );
-  const init = await client.initialize({ protocolVersion: 1 });
+  const init = await client.initialize({
+    protocolVersion: 1,
+    clientCapabilities: subagentEvents
+      ? { _meta: { lody: { subagentEvents: { version: 1 } } } }
+      : {},
+  });
   assert.equal(init.agentCapabilities._meta.lody.subagents.cancel, true);
   const mcpServers = [
     {
@@ -204,6 +216,7 @@ async function start(
     client,
     id,
     configOptions: result.configOptions,
+    runEvents,
     prompt: (text) =>
       client.prompt({ sessionId: id, prompt: [{ type: "text", text }] }),
     close: async () => {
@@ -543,7 +556,13 @@ try {
       },
     )});`,
   );
-  const c = await start(undefined, [plugin], "extensiontest");
+  const c = await start(
+    undefined,
+    [plugin],
+    "extensiontest",
+    "resumeSession",
+    true,
+  );
   assert.ok(
     c.configOptions
       ?.find((option) => option.id === "model" || option.category === "model")
@@ -561,6 +580,23 @@ try {
     { sessionId: c.id, taskId: extensionTasks.tasks.at(-1).taskId },
   );
   assert.match(extensionOutput.output, /CHILD_RESULT/);
+  assert.equal(c.runEvents[0].type, "snapshot");
+  assert.equal(c.runEvents[0].snapshot.state, "running");
+  assert.ok(
+    c.runEvents.some(
+      (event) =>
+        event.type === "output" &&
+        event.update.sessionUpdate === "agent_message_chunk" &&
+        event.update.content.text.includes("CHILD_RESULT"),
+    ),
+  );
+  assert.equal(c.runEvents.at(-1).snapshot.state, "completed");
+  assert.ok(
+    c.runEvents.every(
+      (event) =>
+        event.sessionId === c.id && event.runId === c.runEvents[0].runId,
+    ),
+  );
   await c.close();
   const broken = join(root, "failing.ts");
   await writeFile(

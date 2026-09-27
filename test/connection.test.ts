@@ -8,6 +8,8 @@ import type * as acp from "@agentclientprotocol/sdk";
 import { PiRpcConnection, initializeResponse } from "../src/connection.js";
 import {
   LODY_EXTENSION_METHODS,
+  LODY_SUBAGENT_EVENT_METHOD,
+  isLodySubagentEvent,
   type SessionUsageUpdate,
 } from "acp-extension-core";
 
@@ -196,6 +198,7 @@ function peer() {
   const usages: SessionUsageUpdate[] = [];
   let client: PiRpcConnection | undefined;
   const host = {
+    subagentEvents: false,
     configureMcp: async (_servers: acp.McpServer[]) => {},
     update: async (notification: acp.SessionNotification) => {
       updates.push(notification);
@@ -288,6 +291,97 @@ const lodyEvent = (payload: Record<string, unknown>) => ({
 });
 
 describe("native Pi connection", () => {
+  it("publishes negotiated child histories without legacy task cards or accounting deltas", async () => {
+    const p = peer();
+    p.host.subagentEvents = true;
+    const events: Record<string, unknown>[] = [];
+    const done = deferred();
+    p.host.extension = async (method, event) => {
+      if (method !== LODY_SUBAGENT_EVENT_METHOD) return;
+      events.push(event);
+      if (
+        event.type === "snapshot" &&
+        (event.snapshot as { state: string }).state === "cancelled"
+      )
+        done.resolve();
+    };
+    await start(p);
+    const emit = (payload: unknown) =>
+      p.emit({
+        type: "extension_ui_request",
+        method: "notify",
+        message: "lody-rpc:" + JSON.stringify(payload),
+      });
+    const task = {
+      taskId: "child",
+      parentToolCallId: "spawn",
+      status: "in_progress",
+      description: "Inspect sources",
+    };
+    emit({ type: "lody_subagent", event: "started", task, state: "running" });
+    emit({
+      type: "lody_subagent_output",
+      taskId: "child",
+      event: {
+        type: "message_update",
+        assistantMessageEvent: { type: "text_delta", delta: "Found it" },
+      },
+    });
+    emit({
+      type: "lody_subagent_output",
+      taskId: "child",
+      event: {
+        type: "tool_execution_start",
+        toolCallId: "read",
+        toolName: "read",
+        args: { path: "a.ts" },
+      },
+    });
+    emit({
+      type: "lody_subagent",
+      event: "updated",
+      task: { ...task, lastToolName: "read" },
+      state: "running",
+    });
+    emit({
+      type: "lody_subagent_output",
+      taskId: "child",
+      event: {
+        type: "tool_execution_end",
+        toolCallId: "read",
+        toolName: "read",
+        result: { content: [{ type: "text", text: "Source" }] },
+      },
+    });
+    emit({
+      type: "lody_subagent",
+      event: "updated",
+      task: { ...task, status: "failed", error: "Cancelled" },
+      state: "killed",
+    });
+    await done.promise;
+    expect(events.every(isLodySubagentEvent)).toBe(true);
+    expect(events.map((event) => event.type)).toEqual([
+      "snapshot",
+      "output",
+      "output",
+      "progress",
+      "output",
+      "snapshot",
+    ]);
+    expect(new Set(events.map((event) => event.runId)).size).toBe(1);
+    expect(events[0]).toMatchObject({
+      sessionId: nativeSession,
+      snapshot: { parentRunId: null, parentToolCallId: "spawn" },
+    });
+    expect(
+      p.updates.some((event) =>
+        ["tool_call", "tool_call_update"].includes(event.update.sessionUpdate),
+      ),
+    ).toBe(false);
+    expect(p.usages).toEqual([]);
+    p.client.close();
+  });
   it.each(["reply-error", "eof"])(
     "distinguishes optional initial stats failure from a dead Pi transport (%s)",
     async (failure) => {
