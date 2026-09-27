@@ -45,8 +45,8 @@ tool starts/results and lifecycle/progress feed Core `_lody/subagents/event`.
 Legacy task cards are suppressed for these runs; non-negotiated clients keep them.
 Children still cannot ask questions or spawn descendants. Existing task-ID
 list/output/cancel endpoints remain separate; normalized run controls are disabled.
-This source change needs a matching new Core build and a rebuilt, checksummed
-managed runtime before it reaches Lody's installed Pi provider.
+Core 0.1.9 supplies the contract and helper. A rebuilt, checksummed managed
+runtime is still required before this reaches Lody's installed Pi provider.
 
 - Native prompts, text/images, tool progress/results, model errors and cancellation.
 - Native file identity for explicit new/resume/load. No session-id map.
