@@ -113,11 +113,9 @@ function extensionNames(
       /\/node_modules\/((?:@[^/]+\/)?[^/]+)$/.exec(dir)?.[1] ??
       posix.basename(dir);
     if (packageEntries.get(packageDir) === 1) return label;
-    const entry = posix
-      .relative(dir, slash(path))
-      .replace(/^extensions\//, "")
-      .replace(/\/index\.[cm]?[jt]s$/, "");
-    return `${label}:${entry}`;
+    const entry = posix.relative(dir, slash(path)).replace(/^extensions\//, "");
+    const parsed = posix.parse(entry);
+    return `${label}:${parsed.name === "index" && parsed.dir ? parsed.dir : entry}`;
   });
 }
 

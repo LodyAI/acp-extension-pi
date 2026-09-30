@@ -9,7 +9,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, relative, sep } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { discoverPiExtensions, parsePiLaunchArgs } from "../src/extensions.js";
 
@@ -203,7 +203,7 @@ describe("discoverPiExtensions", () => {
         ["fixture-nested", ["./build/adapters/pi/extension.js"]],
         [
           "fixture-multi",
-          ["./extensions/named.ts", "./extensions/other/index.ts"],
+          ["./extensions/named.ts", "./extensions/other/index.tsx"],
         ],
       ];
       for (const [name, entries] of npmPackages) {
@@ -253,22 +253,39 @@ describe("discoverPiExtensions", () => {
     });
     expect(result.version).toBe(1);
     expect(result.agentDir).toBe(agentDir);
+    const npm = "agent/npm/node_modules/";
     expect(
-      Object.fromEntries(
-        result.extensions.map((item) => [item.name, item.source]),
-      ),
-    ).toEqual({
-      "ambient.ts": "directory",
-      alpha: "directory",
-      beta: "directory",
-      "explicit ext.ts": "settings",
-      "local package": "package",
-      "fixture-package": "package",
-      "@fixture/scoped": "package",
-      "fixture-nested": "package",
-      "fixture-multi:named.ts": "package",
-      "fixture-multi:other": "package",
-    });
+      result.extensions
+        .map((item) => [
+          relative(dir, item.path).split(sep).join("/"),
+          item.name,
+          item.source,
+        ])
+        .sort(([a], [b]) => (a < b ? -1 : 1)),
+    ).toEqual([
+      ["agent/extensions/alpha/index.ts", "alpha", "directory"],
+      ["agent/extensions/ambient.ts", "ambient.ts", "directory"],
+      ["agent/extensions/beta/index.ts", "beta", "directory"],
+      [`${npm}@fixture/scoped/index.ts`, "@fixture/scoped", "package"],
+      [
+        `${npm}fixture-multi/extensions/named.ts`,
+        "fixture-multi:named.ts",
+        "package",
+      ],
+      [
+        `${npm}fixture-multi/extensions/other/index.tsx`,
+        "fixture-multi:other",
+        "package",
+      ],
+      [
+        `${npm}fixture-nested/build/adapters/pi/extension.js`,
+        "fixture-nested",
+        "package",
+      ],
+      [`${npm}fixture-package/index.js`, "fixture-package", "package"],
+      ["explicit ext.ts", "explicit ext.ts", "settings"],
+      ["local package/entry.js", "local package", "package"],
+    ]);
     expect(
       result.warnings.some((warning) => /not installed/i.test(warning)),
     ).toBe(true);
