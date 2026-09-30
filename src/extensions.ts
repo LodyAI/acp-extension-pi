@@ -1,6 +1,6 @@
 import { readFileSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { basename, isAbsolute, join, normalize } from "node:path";
+import { isAbsolute, join, normalize, posix } from "node:path";
 import { z } from "zod";
 
 export const PI_EXTENSIONS_ENV = "LODY_PI_EXTENSIONS";
@@ -96,6 +96,29 @@ export function parsePiLaunchArgs(args: string[]): {
   };
 }
 
+function extensionNames(
+  items: Array<{ path: string; packageDir?: string }>,
+): string[] {
+  const slash = (path: string) => path.replace(/\\/g, "/");
+  const packageEntries = new Map<string, number>();
+  for (const { packageDir } of items)
+    if (packageDir !== undefined)
+      packageEntries.set(packageDir, (packageEntries.get(packageDir) ?? 0) + 1);
+  return items.map(({ path, packageDir }) => {
+    const file = posix.parse(slash(path));
+    if (packageDir === undefined)
+      return file.name === "index" ? posix.basename(file.dir) : file.base;
+    const dir = slash(packageDir);
+    const label =
+      /\/node_modules\/((?:@[^/]+\/)?[^/]+)$/.exec(dir)?.[1] ??
+      posix.basename(dir);
+    if (packageEntries.get(packageDir) === 1) return label;
+    const entry = posix.relative(dir, slash(path)).replace(/^extensions\//, "");
+    const parsed = posix.parse(entry);
+    return `${label}:${parsed.name === "index" && parsed.dir ? parsed.dir : entry}`;
+  });
+}
+
 export async function discoverPiExtensions(): Promise<{
   version: 1;
   agentDir: string;
@@ -142,11 +165,20 @@ export async function discoverPiExtensions(): Promise<{
     missing = true;
     return "skip";
   });
-  const extensions = resources.extensions
-    .filter((item) => item.metadata.scope === "user")
-    .map((item) => ({
+  const user = resources.extensions.filter(
+    (item) => item.metadata.scope === "user",
+  );
+  const names = extensionNames(
+    user.map((item) => ({
       path: item.path,
-      name: basename(item.path),
+      packageDir:
+        item.metadata.origin === "package" ? item.metadata.baseDir : undefined,
+    })),
+  );
+  const extensions = user
+    .map((item, index) => ({
+      path: item.path,
+      name: names[index],
       source:
         item.metadata.origin === "package"
           ? ("package" as const)
