@@ -198,6 +198,35 @@ describe("discoverPiExtensions", () => {
         }),
       );
       writeFileSync(join(npmPackage, "index.js"), guard(dir));
+      const npmPackages: Array<[string, string[]]> = [
+        ["@fixture/scoped", ["./index.ts"]],
+        ["fixture-nested", ["./build/adapters/pi/extension.js"]],
+        [
+          "fixture-multi",
+          ["./extensions/named.ts", "./extensions/other/index.ts"],
+        ],
+      ];
+      for (const [name, entries] of npmPackages) {
+        const packageDir = join(agent, "npm", "node_modules", name);
+        mkdirSync(join(packageDir, "build", "adapters", "pi"), {
+          recursive: true,
+        });
+        mkdirSync(join(packageDir, "extensions", "other"), { recursive: true });
+        writeFileSync(
+          join(packageDir, "package.json"),
+          JSON.stringify({
+            name,
+            version: "1.0.0",
+            pi: { extensions: entries },
+          }),
+        );
+        for (const entry of entries)
+          writeFileSync(join(packageDir, entry), guard(dir));
+      }
+      for (const name of ["alpha", "beta"]) {
+        mkdirSync(join(agent, "extensions", name));
+        writeFileSync(join(agent, "extensions", name, "index.ts"), guard(dir));
+      }
       writeFileSync(
         join(project, ".pi", "extensions", "project.ts"),
         guard(dir),
@@ -212,6 +241,9 @@ describe("discoverPiExtensions", () => {
           extensions: [explicit],
           packages: [
             "npm:fixture-package@1.2.3",
+            "npm:@fixture/scoped@1.0.0",
+            "npm:fixture-nested@1.0.0",
+            "npm:fixture-multi@1.0.0",
             localPackage,
             "npm:@lody-fixture/missing-package@9.9.9",
           ],
@@ -221,13 +253,22 @@ describe("discoverPiExtensions", () => {
     });
     expect(result.version).toBe(1);
     expect(result.agentDir).toBe(agentDir);
-    const byName = new Map(result.extensions.map((item) => [item.name, item]));
-    expect(byName.get("ambient.ts")?.source).toBe("directory");
-    expect(byName.get("explicit ext.ts")?.source).toBe("settings");
-    expect(byName.get("entry.js")?.source).toBe("package");
-    expect(byName.get("index.js")?.source).toBe("package");
-    expect(byName.has("project.ts")).toBe(false);
-    expect(byName.has("project-local.ts")).toBe(false);
+    expect(
+      Object.fromEntries(
+        result.extensions.map((item) => [item.name, item.source]),
+      ),
+    ).toEqual({
+      "ambient.ts": "directory",
+      alpha: "directory",
+      beta: "directory",
+      "explicit ext.ts": "settings",
+      "local package": "package",
+      "fixture-package": "package",
+      "@fixture/scoped": "package",
+      "fixture-nested": "package",
+      "fixture-multi:named.ts": "package",
+      "fixture-multi:other": "package",
+    });
     expect(
       result.warnings.some((warning) => /not installed/i.test(warning)),
     ).toBe(true);
