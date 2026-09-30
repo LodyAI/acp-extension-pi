@@ -4,12 +4,8 @@ import type {
   ExtensionAPI,
   ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
-import {
-  CallToolResultSchema,
-  type CallToolResult,
-} from "@modelcontextprotocol/sdk/types.js";
+import { Client } from "@modelcontextprotocol/client";
+import { StdioClientTransport } from "@modelcontextprotocol/client/stdio";
 
 export const MCP_CONFIG_ENV = "LODY_PI_MCP_CONFIG";
 type StdioServer = Extract<McpServer, { command: string }>;
@@ -40,7 +36,12 @@ export async function registerMcpTools(pi: ExtensionAPI): Promise<void> {
   });
   try {
     for (const server of servers) {
-      const client = new Client({ name: "lody-pi", version: "0.1.0" });
+      // Auto probes the 2026 era and falls back to the supported initialize
+      // handshake. The SDK isolates stdio probing in a disposable sibling.
+      const client = new Client(
+        { name: "lody-pi", version: "0.1.0" },
+        { versionNegotiation: { mode: "auto" } },
+      );
       clients.push(client);
       const transport = new StdioClientTransport({
         command: server.command,
@@ -71,15 +72,13 @@ export async function registerMcpTools(pi: ExtensionAPI): Promise<void> {
             description: tool.description ?? tool.name,
             parameters: tool.inputSchema as ToolDefinition["parameters"],
             async execute(_id, args, signal) {
-              // The SDK validates this schema but types the result as a compatibility union.
-              const result = (await client.callTool(
+              const result = await client.callTool(
                 {
                   name: tool.name,
                   arguments: args as Record<string, unknown>,
                 },
-                CallToolResultSchema,
                 { signal },
-              )) as CallToolResult;
+              );
               const content = result.content.map((block) => {
                 if (block.type !== "text" && block.type !== "image")
                   throw new Error(
