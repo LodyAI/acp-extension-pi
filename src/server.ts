@@ -1,4 +1,5 @@
-import { spawn, type ChildProcess } from "node:child_process";
+import type { ChildProcess } from "node:child_process";
+import spawn from "cross-spawn";
 import { Readable, Writable } from "node:stream";
 import { fileURLToPath } from "node:url";
 import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
@@ -17,6 +18,7 @@ import {
 } from "acp-extension-core";
 import { PiRpcConnection, initializeResponse } from "./connection.js";
 import { PI_EXTENSIONS_ENV, parsePiLaunchArgs } from "./extensions.js";
+import { resolvePiLaunch } from "./launch.js";
 import { MCP_CONFIG_ENV } from "./mcp.js";
 import { listPiSessions } from "./sessions.js";
 
@@ -110,39 +112,31 @@ export function serve(stream: Stream, piArgs: string[] = []) {
       configDirectory = mkdtempSync(join(tmpdir(), "lody-pi-mcp-"));
       const configPath = join(configDirectory, "servers.json");
       writeFileSync(configPath, "[]", { mode: 0o600 });
-      const entry = fileURLToPath(
-        new URL(
-          "./bundle/cli.js",
-          import.meta.resolve("@earendil-works/pi-coding-agent"),
-        ),
-      );
-      child = spawn(
-        process.execPath,
-        [
-          entry,
-          ...parsed.args,
-          "--mode",
-          "rpc",
-          "--no-extensions",
-          "-e",
-          fileURLToPath(new URL("./extension.js", import.meta.url)),
-        ],
-        {
-          cwd,
-          env: {
-            ...process.env,
-            [MCP_CONFIG_ENV]: configPath,
-            [PI_EXTENSIONS_ENV]: JSON.stringify(parsed.extensions),
-          },
-          stdio: ["pipe", "pipe", "pipe"],
-          detached: process.platform !== "win32",
+      const { command, args: launchArgs } = resolvePiLaunch([
+        ...parsed.args,
+        "--mode",
+        "rpc",
+        "--no-extensions",
+        "-e",
+        fileURLToPath(new URL("./extension.js", import.meta.url)),
+      ]);
+      child = spawn(command, launchArgs, {
+        cwd,
+        windowsHide: true,
+        env: {
+          ...process.env,
+          [MCP_CONFIG_ENV]: configPath,
+          [PI_EXTENSIONS_ENV]: JSON.stringify(parsed.extensions),
         },
-      );
+        stdio: ["pipe", "pipe", "pipe"],
+        detached: process.platform !== "win32",
+      });
       child.once("exit", () => {
         if (!closing) process.exitCode = 1;
         void close();
       });
-      child.once("error", () => {
+      child.once("error", (error) => {
+        console.error("[acp-extension-pi] Failed to launch Pi:", error);
         process.exitCode = 1;
         void close();
       });

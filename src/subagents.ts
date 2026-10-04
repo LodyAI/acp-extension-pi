@@ -1,6 +1,5 @@
-import { spawn } from "node:child_process";
+import spawn from "cross-spawn";
 import { randomUUID } from "node:crypto";
-import { fileURLToPath } from "node:url";
 import { join } from "node:path";
 import type {
   ExtensionAPI,
@@ -10,6 +9,7 @@ import type {
 import type { LodySubagentTask, LodyTaskMeta } from "acp-extension-core";
 import { z } from "zod";
 import { PI_EXTENSIONS_ENV } from "./extensions.js";
+import { resolvePiLaunch } from "./launch.js";
 
 const MAX_OUTPUT = 64 * 1024;
 type Task = {
@@ -47,43 +47,33 @@ export function registerSubagents(
       if (!ctx.model)
         throw new Error("Select a model before starting a subagent");
       const id = randomUUID();
-      const entry = fileURLToPath(
-        new URL(
-          "./bundle/cli.js",
-          import.meta.resolve("@earendil-works/pi-coding-agent"),
-        ),
-      );
       const extensions: string[] = JSON.parse(
         process.env[PI_EXTENSIONS_ENV] ?? "[]",
       );
-      const proc = spawn(
-        process.execPath,
-        [
-          entry,
-          "--mode",
-          "json",
-          "-p",
-          "--no-session",
-          "--no-extensions",
-          ...extensions.flatMap((path) => ["-e", path]),
-          "--model",
-          `${ctx.model.provider}/${ctx.model.id}`,
-          "--thinking",
-          pi.getThinkingLevel(),
-          "--append-system-prompt",
-          "You are a subagent. Complete the delegated task. If information is missing, report it to the parent; do not ask the user. Do not start other agents.",
-          "--",
-          args.task,
-        ],
-        {
-          cwd: ctx.cwd,
-          stdio: ["ignore", "pipe", "pipe"],
-          // Stay in the parent Pi process group so adapter shutdown also kills
-          // children if Pi cannot finish its cooperative shutdown hook.
-          detached: false,
-          windowsHide: true,
-        },
-      );
+      const { command, args: launchArgs } = resolvePiLaunch([
+        "--mode",
+        "json",
+        "-p",
+        "--no-session",
+        "--no-extensions",
+        ...extensions.flatMap((path) => ["-e", path]),
+        "--model",
+        `${ctx.model.provider}/${ctx.model.id}`,
+        "--thinking",
+        pi.getThinkingLevel(),
+        "--append-system-prompt",
+        "You are a subagent. Complete the delegated task. If information is missing, report it to the parent; do not ask the user. Do not start other agents.",
+        "--",
+        args.task,
+      ]);
+      const proc = spawn(command, launchArgs, {
+        cwd: ctx.cwd,
+        stdio: ["ignore", "pipe", "pipe"],
+        // Stay in the parent Pi process group so adapter shutdown also kills
+        // children if Pi cannot finish its cooperative shutdown hook.
+        detached: false,
+        windowsHide: true,
+      });
       let finish!: () => void;
       let cancellation: Promise<void> | undefined;
       let forced: ReturnType<typeof setTimeout> | undefined;
