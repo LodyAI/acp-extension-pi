@@ -1299,7 +1299,7 @@ describe("native Pi connection", () => {
               {
                 type: "toolCall",
                 id: "t2",
-                name: "todo",
+                name: "lody_todo",
                 arguments: { action: "add" },
               },
               {
@@ -1320,7 +1320,7 @@ describe("native Pi connection", () => {
           message("r2", "r1", {
             role: "toolResult",
             toolCallId: "t2",
-            toolName: "todo",
+            toolName: "lody_todo",
             content: [{ type: "text", text: "{}" }],
             details: { todos },
             isError: false,
@@ -1409,6 +1409,56 @@ describe("native Pi connection", () => {
         content: { type: "text", text: "Done" },
       },
     ]);
+    p.close();
+  });
+
+  it("does not restore a plan panel from legacy generic-named todo tool results", async () => {
+    const p = peer();
+    await start(p);
+    const entry = (id: string, parentId: string | null, fields: object) => ({
+      id,
+      parentId,
+      timestamp: "2026-01-01T00:00:00.000Z",
+      ...fields,
+    });
+    const message = (id: string, parentId: string | null, value: object) =>
+      entry(id, parentId, { type: "message", message: value });
+    const todos = [{ id: 1, text: "Ship", done: false }];
+    const legacyEntry = message("a1", "u1", {
+      role: "assistant",
+      content: [
+        {
+          type: "toolCall",
+          id: "t1",
+          name: "todo",
+          arguments: { action: "add" },
+        },
+      ],
+    });
+    const legacyResult = message("r1", "a1", {
+      role: "toolResult",
+      toolCallId: "t1",
+      toolName: "todo",
+      content: [{ type: "text", text: "{}" }],
+      details: { todos },
+      isError: false,
+    });
+    p.setEntries((request) =>
+      p.reply(request, {
+        leafId: "r1",
+        entries: [legacyEntry, legacyResult],
+      }),
+    );
+    // A pre-rename session (or a user extension) recording the generic "todo"
+    // name replays as a plain tool call; only "lody_todo" drives the panel.
+    await p.client.resumeSession({
+      sessionId: prompt.sessionId,
+      cwd: "/work",
+      mcpServers: [],
+    });
+    expect(p.updates.some((u) => u.update.sessionUpdate === "plan")).toBe(
+      false,
+    );
     p.close();
   });
 

@@ -406,7 +406,7 @@ export class PiRpcConnection implements AgentConnection {
             sessionUpdate: "tool_call",
           });
           const todos = todosSchema.safeParse(result?.details);
-          if (block.name === "todo" && todos.success)
+          if (block.name === "lody_todo" && todos.success)
             await this.update({
               sessionUpdate: "plan",
               entries: planEntries(todos.data),
@@ -1255,7 +1255,11 @@ export class PiRpcConnection implements AgentConnection {
         isError: z.boolean().optional(),
       })
       .parse(event);
-    if (!childId && this.host.subagentEvents && tool.toolName === "subagent")
+    if (
+      !childId &&
+      this.host.subagentEvents &&
+      tool.toolName === "lody_subagent"
+    )
       return;
     const start = tool.type === "tool_execution_start";
     const end = tool.type === "tool_execution_end";

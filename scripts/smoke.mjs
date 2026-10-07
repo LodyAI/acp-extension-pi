@@ -51,7 +51,7 @@ const server = createServer(async (request, response) => {
   if (last?.role !== "tool") {
     if (content.includes("ASK_TEST"))
       tool = [
-        "questionnaire",
+        "lody_questionnaire",
         {
           questions: [
             {
@@ -64,8 +64,9 @@ const server = createServer(async (request, response) => {
         },
       ];
     if (content.includes("TODO_TEST"))
-      tool = ["todo", { action: "add", text: "Verify native adapter" }];
-    if (content.includes("CLEAR_TODO")) tool = ["todo", { action: "clear" }];
+      tool = ["lody_todo", { action: "add", text: "Verify native adapter" }];
+    if (content.includes("CLEAR_TODO"))
+      tool = ["lody_todo", { action: "clear" }];
     if (content.includes("MCP_TEST"))
       tool = ["mcp_fixture_echo", { value: "native-mcp" }];
     if (content.includes("MCP_ERROR")) tool = ["mcp_fixture_error", {}];
@@ -74,17 +75,17 @@ const server = createServer(async (request, response) => {
       tool = ["mcp_fixture_echo", { value: "unsupported-resource" }];
     if (content.includes("SUB_TEST"))
       tool = [
-        "subagent",
+        "lody_subagent",
         { task: "CHILD_TEST", description: "Inspect child task" },
       ];
     if (content.includes("CANCEL_SUB"))
       tool = [
-        "subagent",
+        "lody_subagent",
         { task: "CHILD_HOLD", description: "Cancelled child" },
       ];
     if (content.includes("SUB_LENGTH"))
       tool = [
-        "subagent",
+        "lody_subagent",
         { task: "CHILD_LENGTH", description: "Truncated child" },
       ];
   }
@@ -324,7 +325,7 @@ try {
   assert.equal(truncated.status, "failed");
   assert.equal(truncated.error, "length");
   const lengthTool = lengthUpdates.find(
-    (update) => update.title === "subagent" && update.status === "failed",
+    (update) => update.title === "lody_subagent" && update.status === "failed",
   );
   assert.equal(lengthTool.rawOutput.details.isError, true);
   assert.match(lengthTool.rawOutput.content[0].text, /^length\n/);
@@ -649,7 +650,12 @@ try {
     ),
   )) {
     const names = body.tools?.map((tool) => tool.function.name) ?? [];
-    assert.ok(!names.includes("questionnaire") && !names.includes("subagent"));
+    assert.ok(
+      !names.includes("questionnaire") &&
+        !names.includes("subagent") &&
+        !names.includes("lody_questionnaire") &&
+        !names.includes("lody_subagent"),
+    );
   }
   console.log(
     "Native Pi V1 smoke passed: questions, todo/resume, session list/load, subagent lifecycle/output/cancel, Stop/recovery, ambient exclusion and explicit extension opt-in",

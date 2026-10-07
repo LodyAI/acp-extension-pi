@@ -30,7 +30,7 @@ export function registerSubagents(
     tasks.clear();
   });
   pi.registerTool({
-    name: "subagent",
+    name: "lody_subagent",
     label: "Subagent",
     description:
       "Delegate a focused task to an isolated Pi agent and wait for its result. It cannot ask the user or spawn further subagents; return missing information to the main agent.",
@@ -281,7 +281,7 @@ export function registerSubagents(
   });
   pi.on("tool_result", (event) => {
     if (
-      event.toolName === "subagent" &&
+      event.toolName === "lody_subagent" &&
       (event.details as { isError?: boolean } | undefined)?.isError
     )
       return { isError: true };

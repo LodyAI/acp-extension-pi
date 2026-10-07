@@ -49,7 +49,7 @@ export function registerBuiltinTools(
       if (
         entry.type !== "message" ||
         entry.message.role !== "toolResult" ||
-        entry.message.toolName !== "todo"
+        entry.message.toolName !== "lody_todo"
       )
         continue;
       const snapshot = z
@@ -60,7 +60,7 @@ export function registerBuiltinTools(
     publish(ctx);
   });
   pi.registerTool({
-    name: "todo",
+    name: "lody_todo",
     label: "Todo",
     description:
       "Manage the task checklist displayed in Lody. List, add, toggle completed, or clear items.",
@@ -105,7 +105,7 @@ export function registerBuiltinTools(
     },
   });
   pi.registerTool({
-    name: "questionnaire",
+    name: "lody_questionnaire",
     label: "Question",
     description:
       "Ask the user one or more questions in Lody and wait for answers. Only the main agent can ask questions.",

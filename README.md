@@ -58,9 +58,15 @@ runtime is still required before this reaches Lody's installed Pi provider.
 - Per-response token usage by model (including compaction summaries and
   subagents), native context snapshots, automatic compaction activity and /compact.
 - ACP-selected stdio MCP tools with text/image results and cancellation.
-- Questionnaire: one or more questions in Lody's existing question card.
-- Todo: list/add/toggle/clear through Lody's existing checklist.
-- Subagent: native Lody task lifecycle, list, output and individual cancellation.
+- Questionnaire (`lody_questionnaire`): one or more questions in Lody's existing
+  question card.
+- Todo (`lody_todo`): list/add/toggle/clear through Lody's existing checklist.
+- Subagent (`lody_subagent`): native Lody task lifecycle, list, output and
+  individual cancellation.
+
+Packaged tools use the reserved `lody_` name prefix; user extensions may keep
+their own `todo`-style names. Older sessions replay legacy `todo` results as
+plain tool calls, without the checklist panel.
 
 MCP audio, resource links and embedded resources are unsupported: a result containing
 any of these fails explicitly, including mixed results. Structured JSON output is
