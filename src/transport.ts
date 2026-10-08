@@ -31,6 +31,7 @@ export class PiTransport {
     stream: PiStream,
     private readonly onEvent: (event: Record<string, unknown>) => Promise<void>,
     private readonly onFailure: (error: Error) => void,
+    private readonly decorateFailure?: (error: Error) => Error,
   ) {
     this.writer = stream.writable.getWriter();
     void this.read(stream.readable).catch((error: unknown) => this.fail(error));
@@ -80,6 +81,7 @@ export class PiTransport {
     if (this.failure) return;
     this.failure =
       error instanceof Error ? error : new Error("Pi RPC connection closed");
+    if (this.decorateFailure) this.failure = this.decorateFailure(this.failure);
     for (const request of this.pending.values()) request.reject(this.failure);
     this.pending.clear();
     this.onFailure(this.failure);

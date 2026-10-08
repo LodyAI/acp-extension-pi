@@ -223,6 +223,7 @@ export class PiRpcConnection implements AgentConnection {
   constructor(
     stream: PiStream,
     private readonly host: Host,
+    decorateFailure?: (error: Error) => Error,
   ) {
     this.rpc = new PiTransport(
       stream,
@@ -237,6 +238,7 @@ export class PiRpcConnection implements AgentConnection {
         this.controls.clear();
         this.pendingSteer?.applied.reject(error);
       },
+      decorateFailure,
     );
   }
 
