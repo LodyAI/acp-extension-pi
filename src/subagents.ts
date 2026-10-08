@@ -36,16 +36,30 @@ export function registerSubagents(
       "Delegate a focused task to an isolated Pi agent and wait for its result. It cannot ask the user or spawn further subagents; return missing information to the main agent.",
     parameters: {
       type: "object",
-      properties: { task: { type: "string" }, description: { type: "string" } },
+      properties: {
+        task: { type: "string" },
+        description: { type: "string" },
+        model: {
+          type: "string",
+          description:
+            "Optional provider/model-id of an available Pi model. Omit to use the current model.",
+        },
+      },
       required: ["task", "description"],
     } as ToolDefinition["parameters"],
     async execute(parentToolCallId, input, signal, _update, ctx) {
       const args = z
-        .object({ task: z.string().min(1), description: z.string().min(1) })
+        .object({
+          task: z.string().min(1),
+          description: z.string().min(1),
+          model: z.string().min(1).optional(),
+        })
         .parse(input);
       if (signal?.aborted) throw new Error("Subagent cancelled before launch");
-      if (!ctx.model)
-        throw new Error("Select a model before starting a subagent");
+      const model = args.model
+        ? resolveModel(ctx, args.model)
+        : ctx.model && `${ctx.model.provider}/${ctx.model.id}`;
+      if (!model) throw new Error("Select a model before starting a subagent");
       const id = randomUUID();
       const extensions: string[] = JSON.parse(
         process.env[PI_EXTENSIONS_ENV] ?? "[]",
@@ -58,7 +72,7 @@ export function registerSubagents(
         "--no-extensions",
         ...extensions.flatMap((path) => ["-e", path]),
         "--model",
-        `${ctx.model.provider}/${ctx.model.id}`,
+        model,
         "--thinking",
         pi.getThinkingLevel(),
         "--append-system-prompt",
@@ -85,7 +99,7 @@ export function registerSubagents(
         taskId: id,
         description: args.description,
         status: "running",
-        modelId: `${ctx.model.provider}/${ctx.model.id}`,
+        modelId: model,
         startedAtEpochSeconds: Date.now() / 1000,
         endedAtEpochSeconds: null,
       };
@@ -314,4 +328,34 @@ export function registerSubagents(
       };
     throw new Error("Unsupported subagent operation");
   };
+}
+
+function resolveModel(ctx: ExtensionContext, requested: string): string {
+  const available = ctx.modelRegistry.getAvailable();
+  const slash = requested.indexOf("/");
+  const provider = requested.slice(0, slash);
+  const match = available.find(
+    (model) =>
+      slash > 0 &&
+      model.provider === provider &&
+      model.id === requested.slice(slash + 1),
+  );
+  if (match) return `${match.provider}/${match.id}`;
+  const sameProvider = available.filter((model) => model.provider === provider);
+  const hint = sameProvider.length
+    ? `Available ${provider} models: ${list(sameProvider.map((model) => model.id))}`
+    : `Available providers: ${list([...new Set(available.map((model) => model.provider))])}`;
+  throw new Error(
+    `Model "${requested}" is not an available provider/model-id. ${hint}`,
+  );
+}
+
+const MAX_HINTS = 20;
+
+function list(names: string[]): string {
+  if (!names.length) return "none";
+  const shown = names.slice(0, MAX_HINTS).join(", ");
+  return names.length > MAX_HINTS
+    ? `${shown} and ${names.length - MAX_HINTS} more`
+    : shown;
 }
