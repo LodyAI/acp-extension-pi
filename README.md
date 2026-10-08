@@ -75,8 +75,10 @@ checklist updates are a display projection. There is no second todo database.
 Todo completion maps to pending/completed; the tool does not invent in-progress
 status. The /todos terminal window is not provided.
 
-Subagent launches an isolated official Pi child and waits for exit. It inherits
-the parent's model, thinking level, cwd and the same explicitly selected
+Subagent launches an isolated official Pi child and waits for exit. It uses the
+optional `model` argument (`provider/model-id`, which must be an available Pi
+model) or else the parent's model. It inherits the parent's thinking level
+(clamped by Pi to the child model), cwd and the same explicitly selected
 extension paths, and uses Pi's built-in tools. It does not inherit MCP clients
 or load the packaged questionnaire/subagent adapter extension.
 The execution owner generates task ids and supplies Core task metadata; Lody

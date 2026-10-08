@@ -24,8 +24,9 @@ workspace packages or reimplement Pi's executor.
 - Subagent execution owns task ids, status, output and child cancellation. Lody
   receives Core task metadata and list/output/cancel methods. Parent tools await
   child exit; child agents have built-in Pi tools, no questionnaire or subagent
-  extension. They inherit model, thinking, cwd and the same explicit extension
-  list, not the parent's MCP clients.
+  extension. They inherit thinking, cwd and the same explicit extension list,
+  not the parent's MCP clients. The model is the tool's optional available
+  `provider/model-id`, else the parent's; reject others before launch.
   Process-local task queries do not resume or replay a terminated child.
 - Negotiated Core subagent events replace legacy live task cards, not execution
   ownership or billing. Stream child JSONL through the adapter; run IDs do not
