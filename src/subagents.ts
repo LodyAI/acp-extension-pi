@@ -343,9 +343,19 @@ function resolveModel(ctx: ExtensionContext, requested: string): string {
   if (match) return `${match.provider}/${match.id}`;
   const sameProvider = available.filter((model) => model.provider === provider);
   const hint = sameProvider.length
-    ? `Available ${provider} models: ${sameProvider.map((model) => model.id).join(", ")}`
-    : `Available providers: ${[...new Set(available.map((model) => model.provider))].join(", ") || "none"}`;
+    ? `Available ${provider} models: ${list(sameProvider.map((model) => model.id))}`
+    : `Available providers: ${list([...new Set(available.map((model) => model.provider))])}`;
   throw new Error(
     `Model "${requested}" is not an available provider/model-id. ${hint}`,
   );
+}
+
+const MAX_HINTS = 20;
+
+function list(names: string[]): string {
+  if (!names.length) return "none";
+  const shown = names.slice(0, MAX_HINTS).join(", ");
+  return names.length > MAX_HINTS
+    ? `${shown} and ${names.length - MAX_HINTS} more`
+    : shown;
 }

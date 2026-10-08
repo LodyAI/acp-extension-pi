@@ -74,6 +74,10 @@ async function runSubagent(input: Record<string, unknown>) {
         getAvailable: () => [
           { provider: "test", id: "model" },
           { provider: "other", id: "vendor/large" },
+          ...Array.from({ length: 25 }, (_, i) => ({
+            provider: "bulk",
+            id: `m${i}`,
+          })),
         ],
       },
       cwd: directory,
@@ -128,6 +132,9 @@ describe("registerSubagents", () => {
     );
     await expect(
       runSubagent({ task: "review", description: "test", model: "missing" }),
-    ).rejects.toThrow("Available providers: test, other");
+    ).rejects.toThrow("Available providers: test, other, bulk");
+    await expect(
+      runSubagent({ task: "review", description: "test", model: "bulk/x" }),
+    ).rejects.toThrow(/: m0, m1, .*, m19 and 5 more$/);
   });
 });
