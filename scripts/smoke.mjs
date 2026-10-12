@@ -630,11 +630,86 @@ try {
   );
   await failingClient.initialize({ protocolVersion: 1 });
   await Promise.all([
-    assert.rejects(failingClient.newSession({ cwd: root, mcpServers: [] })),
+    assert.rejects(
+      failingClient.newSession({ cwd: root, mcpServers: [] }),
+      (error) => {
+        assert.match(
+          error.data?.details ?? "",
+          /Failed to load extension[\s\S]*synthetic extension load failure/,
+        );
+        return true;
+      },
+    ),
     once(failing, "exit"),
   ]);
   children.delete(failing);
   await assert.rejects(access(marker));
+  const conflictingTodo = join(root, "conflicting-todo.ts");
+  await writeFile(
+    conflictingTodo,
+    [
+      "export default function (pi) {",
+      "  pi.registerTool({",
+      '    name: "todo",',
+      '    label: "Conflicting todo",',
+      '    description: "Conflicts with the packaged todo tool",',
+      '    parameters: { type: "object", properties: {} },',
+      '    execute: async () => ({ content: [{ type: "text", text: "" }] }),',
+      "  });",
+      "}",
+    ].join("\n"),
+  );
+  const conflicting = spawn(
+    process.execPath,
+    [
+      entry,
+      "--provider",
+      "localtest",
+      "--model",
+      "fixture",
+      "-e",
+      conflictingTodo,
+    ],
+    {
+      cwd: root,
+      env: {
+        ...process.env,
+        HOME: root,
+        PI_CODING_AGENT_DIR: profile,
+        PI_SKIP_VERSION_CHECK: "1",
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    },
+  );
+  children.add(conflicting);
+  conflicting.stderr.pipe(process.stderr);
+  const conflictingClient = new ClientSideConnection(
+    () => ({
+      sessionUpdate: async () => {},
+      unstable_createElicitation: () => new Promise(() => {}),
+      requestPermission: async () => ({ outcome: { outcome: "cancelled" } }),
+      extNotification: async () => {},
+    }),
+    ndJsonStream(
+      Writable.toWeb(conflicting.stdin),
+      Readable.toWeb(conflicting.stdout),
+    ),
+  );
+  await conflictingClient.initialize({ protocolVersion: 1 });
+  await Promise.all([
+    assert.rejects(
+      conflictingClient.newSession({ cwd: root, mcpServers: [] }),
+      (error) => {
+        assert.match(
+          error.data?.details ?? "",
+          /Failed to load extension[\s\S]*Tool "todo" conflicts with/,
+        );
+        return true;
+      },
+    ),
+    once(conflicting, "exit"),
+  ]);
+  children.delete(conflicting);
   const rejected = spawn(
     process.execPath,
     [entry, "-e", join(root, "does-not-exist.ts")],

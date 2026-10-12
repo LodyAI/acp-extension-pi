@@ -16,6 +16,7 @@ import {
   normalizeLodyExtensionMethod,
   supportsLodySubagentEvents,
 } from "acp-extension-core";
+import { PiStderrDiagnostics } from "./diagnostics.js";
 import { PiRpcConnection, initializeResponse } from "./connection.js";
 import { PI_EXTENSIONS_ENV, parsePiLaunchArgs } from "./extensions.js";
 import { resolvePiLaunch } from "./launch.js";
@@ -50,6 +51,7 @@ export function serve(stream: Stream, piArgs: string[] = []) {
   let current: PiRpcConnection | undefined;
   let cwd: string | undefined;
   let closing: Promise<void> | undefined;
+  let piExitedUnexpectedly = false;
   let configDirectory: string | undefined;
   let resolveClosed!: () => void;
   const closed = new Promise<void>((resolve) => {
@@ -132,7 +134,10 @@ export function serve(stream: Stream, piArgs: string[] = []) {
         detached: process.platform !== "win32",
       });
       child.once("exit", () => {
-        if (!closing) process.exitCode = 1;
+        if (!closing) {
+          piExitedUnexpectedly = true;
+          process.exitCode = 1;
+        }
         void close();
       });
       child.once("error", (error) => {
@@ -140,7 +145,12 @@ export function serve(stream: Stream, piArgs: string[] = []) {
         process.exitCode = 1;
         void close();
       });
+      const diagnostics = new PiStderrDiagnostics(
+        () => !closing || piExitedUnexpectedly,
+      );
+      child.stderr!.setEncoding("utf8");
       child.stderr!.pipe(process.stderr, { end: false });
+      child.stderr!.on("data", (chunk) => diagnostics.append(chunk));
       const pi = new PiRpcConnection(
         {
           writable: Writable.toWeb(child.stdin!),
@@ -168,10 +178,14 @@ export function serve(stream: Stream, piArgs: string[] = []) {
           },
           question: (request) => client.unstable_createElicitation(request),
         },
+        (error) => diagnostics.decorateError(error),
       );
       current = pi;
       runtime = Promise.race([
-        pi.initialize({ protocolVersion: 1 }).then(() => pi),
+        pi.initialize({ protocolVersion: 1 }).then(() => {
+          diagnostics.stop();
+          return pi;
+        }),
         new Promise<never>((_resolve, reject) => child!.once("error", reject)),
       ]);
       return runtime;

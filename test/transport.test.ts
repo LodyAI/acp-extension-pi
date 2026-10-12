@@ -113,3 +113,31 @@ describe("Pi JSONL transport", () => {
     });
   });
 });
+
+describe("Pi transport failure decoration", () => {
+  it("decorates EOF failures for pending and later requests", async () => {
+    let output!: ReadableStreamDefaultController<Uint8Array>;
+    const rpc = new PiTransport(
+      {
+        readable: new ReadableStream({
+          start(controller) {
+            output = controller;
+          },
+        }),
+        writable: new WritableStream(),
+      },
+      async () => undefined,
+      () => undefined,
+      (error) =>
+        new Error(
+          `${error.message}\nTool "todo" conflicts with "/tmp/todo.ts"`,
+        ),
+    );
+    const result = rpc.request("new_session");
+    output.close();
+    await expect(result).rejects.toThrow(
+      'Pi RPC connection closed\nTool "todo" conflicts with "/tmp/todo.ts"',
+    );
+    await expect(rpc.request("new_session")).rejects.toThrow("conflicts with");
+  });
+});

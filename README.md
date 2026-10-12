@@ -152,3 +152,9 @@ subagent. The same script accepts an installed dist/index.js path.
 These checks do not establish current Electron visual acceptance or real-provider
 quality. Historical checks of the previous SDK implementation do not validate
 this architecture.
+
+When Pi exits during startup, adapter failures include only a short extension
+diagnostics allowlist: load failures, tool-name conflicts and extension-related
+hints. Other startup failures remain on the process stream and can be added to
+the allowlist later when their presentation is defined; unrelated output is
+never forwarded through ACP.
