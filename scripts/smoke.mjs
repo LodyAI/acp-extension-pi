@@ -216,6 +216,7 @@ async function start(
     client,
     id,
     configOptions: result.configOptions,
+    availableCommands: result.availableCommands,
     runEvents,
     prompt: (text) =>
       client.prompt({ sessionId: id, prompt: [{ type: "text", text }] }),
@@ -238,6 +239,12 @@ const deadline = setTimeout(
 );
 try {
   const a = await start();
+  assert(
+    Array.isArray(a.availableCommands) &&
+      a.availableCommands.some((command) => command.name === "compact") &&
+      a.availableCommands.some((command) => command.name === "stats"),
+    "newSession response must carry local slash commands",
+  );
   await a.prompt("MCP_TEST");
   assert.ok(
     updates.some((update) =>

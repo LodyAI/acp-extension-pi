@@ -59,6 +59,24 @@ const statsSchema = z.object({
     })
     .optional(),
 });
+const commandsSchema = z.object({
+  commands: z.array(
+    z.object({
+      name: z.string().min(1),
+      description: z.string().nullish(),
+    }),
+  ),
+});
+/** Lody reads the command list from the session response, a deliberate
+ * extension of the standard ACP payload that the SDK types predate. */
+type WithCommands<T> = T & {
+  availableCommands: acp.AvailableCommand[];
+};
+type SessionResponseWithCommands = WithCommands<acp.NewSessionResponse>;
+const LOCAL_COMMANDS = [
+  { name: "compact", description: "Manually compact the session context" },
+  { name: "stats", description: "Show Pi session usage and cost" },
+];
 const startupConfigSchema = z.object({
   lody: z.object({
     sessionConfig: z.object({
@@ -273,14 +291,18 @@ export class PiRpcConnection implements AgentConnection {
     this.open(request, false);
 
   loadSession: AgentConnection["loadSession"] = async (request) => {
-    const { configOptions } = await this.open(request, true);
-    return { configOptions };
+    const { configOptions, availableCommands } = await this.open(request, true);
+    const response: WithCommands<acp.LoadSessionResponse> = {
+      configOptions,
+      availableCommands,
+    };
+    return response;
   };
 
   private open(
     request: acp.ResumeSessionRequest,
     replay: boolean,
-  ): Promise<acp.NewSessionResponse> {
+  ): Promise<SessionResponseWithCommands> {
     return this.configure(async () => {
       this.cwd = request.cwd;
       if (
@@ -314,7 +336,7 @@ export class PiRpcConnection implements AgentConnection {
   private async prepare(
     meta: unknown,
     replay = false,
-  ): Promise<acp.NewSessionResponse> {
+  ): Promise<SessionResponseWithCommands> {
     const config = startupConfigSchema.safeParse(meta);
     if (config.success) {
       const values = config.data.lody.sessionConfig.configOptionValues;
@@ -341,7 +363,12 @@ export class PiRpcConnection implements AgentConnection {
     }
     const configOptions = await this.configOptions();
     await this.reportUsage();
-    return { sessionId: this.sessionId, configOptions };
+    const availableCommands = await this.availableCommands();
+    // Lody reads the response top-level field; this keeps live clients in sync.
+    setTimeout(() => {
+      void this.pushAvailableCommands(availableCommands).catch(() => undefined);
+    }, 0);
+    return { sessionId: this.sessionId, configOptions, availableCommands };
   }
 
   /** Replays the native branch Pi will continue from, using Pi's own tool call ids. */
@@ -1210,6 +1237,43 @@ export class PiRpcConnection implements AgentConnection {
       [model]: toModelUsage(usage),
     });
     if (update) this.host.usage(update);
+  }
+
+  /** Local handlers win over Pi's own commands on a name collision. */
+  private async availableCommands(): Promise<acp.AvailableCommand[]> {
+    const commands = new Map<string, acp.AvailableCommand>();
+    for (const command of LOCAL_COMMANDS)
+      commands.set(command.name, { ...command, input: null });
+    try {
+      // get_commands is a Pi 0.87.0 RPC snapshot; a shape change degrades
+      // silently to the local commands below.
+      const result = commandsSchema.parse(
+        await this.rpc.request("get_commands"),
+      );
+      for (const command of result.commands) {
+        // The private steer transport is registered as a Pi command, but it is
+        // adapter plumbing and must never reach the client command list.
+        if (command.name === this.steerCommand) continue;
+        if (commands.has(command.name)) continue;
+        commands.set(command.name, {
+          name: command.name,
+          description: command.description ?? "",
+          input: null,
+        });
+      }
+    } catch {
+      // A missing command source is not fatal.
+    }
+    return Array.from(commands.values());
+  }
+
+  private async pushAvailableCommands(
+    commands: acp.AvailableCommand[],
+  ): Promise<void> {
+    await this.update({
+      sessionUpdate: "available_commands_update",
+      availableCommands: commands,
+    });
   }
 
   /** Context occupancy and the /status text come from Pi stats; accounting does not. */

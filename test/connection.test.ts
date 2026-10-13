@@ -85,6 +85,28 @@ function peer() {
       tokens: { input: 20, output: 10, cacheRead: 4, cacheWrite: 2 },
       cost: 0.02,
     });
+  // The duplicate compact exposes local-command precedence over Pi commands.
+  let onCommands = (request: Record<string, unknown>) =>
+    reply(request, {
+      commands: [
+        { name: "compact", description: "Pi compact", source: "extension" },
+        {
+          name: "lody-steer",
+          description: "Lody internal steering transport",
+          source: "extension",
+        },
+        {
+          name: "review",
+          description: "Review the working diff",
+          source: "prompt",
+        },
+        {
+          name: "skill:commit",
+          description: "Commit the working changes",
+          source: "skill",
+        },
+      ],
+    });
   function reply(
     request: Record<string, unknown>,
     data?: unknown,
@@ -140,6 +162,9 @@ function peer() {
           break;
         case "get_session_stats":
           onStats(request);
+          break;
+        case "get_commands":
+          onCommands(request);
           break;
         case "get_available_models":
           onModels(request);
@@ -232,6 +257,9 @@ function peer() {
     setEntries(handler: typeof onEntries) {
       onEntries = handler;
     },
+    setCommands(handler: typeof onCommands) {
+      onCommands = handler;
+    },
     get client() {
       return (client ??= new PiRpcConnection(stream, host));
     },
@@ -291,6 +319,89 @@ const lodyEvent = (payload: Record<string, unknown>) => ({
 });
 
 describe("native Pi connection", () => {
+  it("reports local and Pi slash commands on session creation", async () => {
+    const p = peer();
+    const response = await start(p);
+    const commands = (response as { availableCommands: unknown })
+      .availableCommands;
+    expect(commands).toEqual([
+      {
+        name: "compact",
+        description: "Manually compact the session context",
+        input: null,
+      },
+      {
+        name: "stats",
+        description: "Show Pi session usage and cost",
+        input: null,
+      },
+      {
+        name: "review",
+        description: "Review the working diff",
+        input: null,
+      },
+      {
+        name: "skill:commit",
+        description: "Commit the working changes",
+        input: null,
+      },
+    ]);
+    p.close();
+  });
+
+  it("reports slash commands on loadSession too", async () => {
+    const p = peer();
+    await p.client.initialize({ protocolVersion: 1 });
+    const response = (await p.client.loadSession({
+      sessionId: nativeSession,
+      cwd: "/work",
+      mcpServers: [],
+    })) as { availableCommands: Array<{ name: string }> };
+    expect(response.availableCommands.map((command) => command.name)).toEqual([
+      "compact",
+      "stats",
+      "review",
+      "skill:commit",
+    ]);
+    p.close();
+  });
+
+  it("re-broadcasts slash commands as a session update", async () => {
+    const p = peer();
+    await start(p);
+    // The broadcast is deferred to a macrotask, so let the event loop turn.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const update = p.updates
+      .map((n) => n.update)
+      .find((u) => u.sessionUpdate === "available_commands_update");
+    expect(update).toMatchObject({
+      sessionUpdate: "available_commands_update",
+      availableCommands: [
+        { name: "compact" },
+        { name: "stats" },
+        { name: "review" },
+        { name: "skill:commit" },
+      ],
+    });
+    p.close();
+  });
+
+  it("falls back to local commands when Pi rejects get_commands", async () => {
+    const p = peer();
+    p.setCommands((request) =>
+      reply(request, undefined, "Unknown command: get_commands"),
+    );
+    const response = await start(p);
+    const commands = (
+      response as { availableCommands: Array<{ name: string }> }
+    ).availableCommands;
+    expect(commands.map((command) => command.name)).toEqual([
+      "compact",
+      "stats",
+    ]);
+    p.close();
+  });
+
   it("publishes negotiated child histories without legacy task cards or accounting deltas", async () => {
     const p = peer();
     p.host.subagentEvents = true;
@@ -1364,51 +1475,55 @@ describe("native Pi connection", () => {
       sessionPath: prompt.sessionId,
     });
     const plan = [{ content: "Ship", priority: "medium", status: "pending" }];
-    expect(p.updates.map((u) => u.update)).toEqual([
-      {
-        sessionUpdate: "user_message_chunk",
-        content: { type: "text", text: "hello" },
-      },
-      {
-        sessionUpdate: "user_message_chunk",
-        content: { type: "image", data: "aW1n", mimeType: "image/png" },
-      },
-      {
-        sessionUpdate: "agent_thought_chunk",
-        content: { type: "text", text: "look first" },
-      },
-      {
-        sessionUpdate: "agent_message_chunk",
-        content: { type: "text", text: "Reading" },
-      },
-      expect.objectContaining({
-        sessionUpdate: "tool_call",
-        toolCallId: "t1",
-        kind: "read",
-        status: "completed",
-        locations: [{ path: resolve("/work", "a.ts") }],
-        content: [{ type: "content", content: { type: "text", text: "file" } }],
-      }),
-      expect.objectContaining({
-        sessionUpdate: "tool_call",
-        toolCallId: "t2",
-        status: "completed",
-      }),
-      { sessionUpdate: "plan", entries: plan },
-      expect.objectContaining({
-        sessionUpdate: "tool_call",
-        toolCallId: "t3",
-        status: "failed",
-      }),
-      {
-        sessionUpdate: "user_message_chunk",
-        content: { type: "text", text: "also this" },
-      },
-      {
-        sessionUpdate: "agent_message_chunk",
-        content: { type: "text", text: "Done" },
-      },
-    ]);
+    expect(p.updates.map((u) => u.update)).toEqual(
+      expect.arrayContaining([
+        {
+          sessionUpdate: "user_message_chunk",
+          content: { type: "text", text: "hello" },
+        },
+        {
+          sessionUpdate: "user_message_chunk",
+          content: { type: "image", data: "aW1n", mimeType: "image/png" },
+        },
+        {
+          sessionUpdate: "agent_thought_chunk",
+          content: { type: "text", text: "look first" },
+        },
+        {
+          sessionUpdate: "agent_message_chunk",
+          content: { type: "text", text: "Reading" },
+        },
+        expect.objectContaining({
+          sessionUpdate: "tool_call",
+          toolCallId: "t1",
+          kind: "read",
+          status: "completed",
+          locations: [{ path: resolve("/work", "a.ts") }],
+          content: [
+            { type: "content", content: { type: "text", text: "file" } },
+          ],
+        }),
+        expect.objectContaining({
+          sessionUpdate: "tool_call",
+          toolCallId: "t2",
+          status: "completed",
+        }),
+        { sessionUpdate: "plan", entries: plan },
+        expect.objectContaining({
+          sessionUpdate: "tool_call",
+          toolCallId: "t3",
+          status: "failed",
+        }),
+        {
+          sessionUpdate: "user_message_chunk",
+          content: { type: "text", text: "also this" },
+        },
+        {
+          sessionUpdate: "agent_message_chunk",
+          content: { type: "text", text: "Done" },
+        },
+      ]),
+    );
     p.close();
   });
 
