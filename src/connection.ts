@@ -64,9 +64,20 @@ const commandsSchema = z.object({
     z.object({
       name: z.string().min(1),
       description: z.string().nullish(),
+      source: z.string().nullish(),
     }),
   ),
 });
+/** Marks the dispatch rejection itself so RPC failures stay non-fatal. */
+class ExtensionCommandError extends Error {
+  constructor(name: string) {
+    super(
+      `/${name} is a Pi extension command; Lody cannot dispatch it safely. Run it in a Pi terminal instead.`,
+    );
+    this.name = "ExtensionCommandError";
+  }
+}
+
 /** Lody reads the command list from the session response, a deliberate
  * extension of the standard ACP payload that the SDK types predate. */
 type WithCommands<T> = T & {
@@ -542,6 +553,7 @@ export class PiRpcConnection implements AgentConnection {
       throw new Error(
         "Internal Pi control commands cannot be submitted as user prompts",
       );
+    await this.rejectExtensionCommand(message);
     const run: Run = {
       ...deferred<acp.PromptResponse>(),
       activities: new Map(),
@@ -1254,6 +1266,9 @@ export class PiRpcConnection implements AgentConnection {
         // The private steer transport is registered as a Pi command, but it is
         // adapter plumbing and must never reach the client command list.
         if (command.name === this.steerCommand) continue;
+        // Pi 0.87.0 cannot report whether an extension command starts a model
+        // turn, so withhold them until a reliable disposition exists.
+        if (command.source === "extension") continue;
         if (commands.has(command.name)) continue;
         commands.set(command.name, {
           name: command.name,
@@ -1265,6 +1280,26 @@ export class PiRpcConnection implements AgentConnection {
       // A missing command source is not fatal.
     }
     return Array.from(commands.values());
+  }
+
+  /** Reject extension command prompts by source before a run is created. */
+  private async rejectExtensionCommand(message: string): Promise<void> {
+    const trimmed = message.trim();
+    if (!trimmed.startsWith("/")) return;
+    const name = trimmed.slice(1).split(/\s+/)[0];
+    if (!name || name === this.steerCommand) return;
+    for (const local of LOCAL_COMMANDS) if (local.name === name) return;
+    try {
+      const result = commandsSchema.parse(
+        await this.rpc.request("get_commands"),
+      );
+      const command = result.commands.find((entry) => entry.name === name);
+      if (command?.source === "extension")
+        throw new ExtensionCommandError(name);
+    } catch (error) {
+      if (error instanceof ExtensionCommandError) throw error;
+      // A missing command source must not block unrelated prompts.
+    }
   }
 
   private async pushAvailableCommands(

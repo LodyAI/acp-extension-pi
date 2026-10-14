@@ -96,6 +96,11 @@ function peer() {
           source: "extension",
         },
         {
+          name: "fff-mode",
+          description: "Toggle the FFF working mode",
+          source: "extension",
+        },
+        {
           name: "review",
           description: "Review the working diff",
           source: "prompt",
@@ -399,6 +404,41 @@ describe("native Pi connection", () => {
       "compact",
       "stats",
     ]);
+    p.close();
+  });
+
+  it("withholds extension commands from the available commands menu", async () => {
+    const p = peer();
+    await start(p);
+    // The broadcast is deferred to a macrotask, so let the event loop turn.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const update = p.updates
+      .map((n) => n.update)
+      .find((u) => u.sessionUpdate === "available_commands_update");
+    expect(update).toMatchObject({
+      sessionUpdate: "available_commands_update",
+      availableCommands: [
+        { name: "compact" },
+        { name: "stats" },
+        { name: "review" },
+        { name: "skill:commit" },
+      ],
+    });
+    p.close();
+  });
+
+  it("rejects a manual extension command without creating a run", async () => {
+    const p = peer();
+    await start(p);
+    await expect(
+      p.client.prompt({
+        sessionId: nativeSession,
+        prompt: [{ type: "text", text: "/fff-mode" }],
+      }),
+    ).rejects.toThrow(/extension command/);
+    const next = p.client.prompt(prompt);
+    p.finish();
+    expect(await next).toEqual({ stopReason: "end_turn" });
     p.close();
   });
 
