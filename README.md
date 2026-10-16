@@ -170,9 +170,10 @@ The same script accepts an installed dist/index.js path.
 
 Upgrade decision and verification limits: [Pi 1.3 runtime note](.agents/notes/implemented/feature/2026-10-16-pi-1.3-runtime.md).
 
-These checks do not establish current Electron visual acceptance or real-provider
-quality. Historical checks of the previous SDK implementation do not validate
-this architecture.
+The separate Electron acceptance round in that note covers one real provider and
+records a host-side image attachment submission limit. It does not establish
+other providers' quality or validate managed-runtime publication/download.
+Historical checks of the previous SDK implementation do not validate this architecture.
 
 When Pi exits during startup, adapter failures include only a short extension
 diagnostics allowlist: load failures, tool-name conflicts and extension-related
