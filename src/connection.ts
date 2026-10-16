@@ -553,7 +553,8 @@ export class PiRpcConnection implements AgentConnection {
       throw new Error(
         "Internal Pi control commands cannot be submitted as user prompts",
       );
-    await this.rejectExtensionCommand(message);
+    // Admit the run before the lookup: a stop arriving mid-lookup must find
+    // a run to cancel, or the prompt still reaches Pi once the lookup returns.
     const run: Run = {
       ...deferred<acp.PromptResponse>(),
       activities: new Map(),
@@ -566,6 +567,12 @@ export class PiRpcConnection implements AgentConnection {
     };
     this.active = run;
     try {
+      await this.rejectExtensionCommand(message);
+      if (run.cancelled) {
+        await run.cancellation;
+        this.finishRun(run);
+        return await run.promise;
+      }
       await this.readState();
       await this.rpc.drain();
       this.assertReady();

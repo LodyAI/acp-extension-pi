@@ -427,7 +427,7 @@ describe("native Pi connection", () => {
     p.close();
   });
 
-  it("rejects a manual extension command without creating a run", async () => {
+  it("rejects a manual extension command without dispatching a run", async () => {
     const p = peer();
     await start(p);
     await expect(
@@ -436,6 +436,37 @@ describe("native Pi connection", () => {
         prompt: [{ type: "text", text: "/fff-mode" }],
       }),
     ).rejects.toThrow(/extension command/);
+    const next = p.client.prompt(prompt);
+    p.finish();
+    expect(await next).toEqual({ stopReason: "end_turn" });
+    p.close();
+  });
+
+  it("records a stop that arrives while the command lookup is waiting", async () => {
+    const p = peer();
+    await start(p);
+    // Hold the get_commands round trip open, so the stop lands while the
+    // adapter is still deciding whether this prompt is an extension command.
+    const lookup = deferred<Record<string, unknown>>();
+    p.setCommands((request) => lookup.resolve(request));
+    const done = p.client.prompt({
+      sessionId: nativeSession,
+      prompt: [{ type: "text", text: "/review the diff" }],
+    });
+    const request = await lookup.promise;
+    // Not awaited: it settles once the lookup reply below releases the run.
+    const cancelled = p.client.cancel({ sessionId: prompt.sessionId });
+    // The handler serves any later lookup; this one is answered by hand below.
+    p.setCommands((next) =>
+      p.reply(next, { commands: [{ name: "review", source: "prompt" }] }),
+    );
+    p.reply(request, { commands: [{ name: "review", source: "prompt" }] });
+    await expect(done).resolves.toEqual({ stopReason: "cancelled" });
+    await cancelled;
+    // The stop must reach Pi and the prompt must never be dispatched.
+    expect(
+      p.commands.filter((command) => command.type === "prompt"),
+    ).toHaveLength(0);
     const next = p.client.prompt(prompt);
     p.finish();
     expect(await next).toEqual({ stopReason: "end_turn" });
