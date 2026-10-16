@@ -73,6 +73,8 @@ runtime is still required before this reaches Lody's installed Pi provider.
 MCP audio, resource links and embedded resources are unsupported: a result containing
 any of these fails explicitly, including mixed results. Structured JSON output is
 appended as text. This validates returned content; it cannot undo an MCP tool's effects.
+Codemode calls also receive the structured MCP result (`content`,
+`structuredContent`, `isError`), so scripts can pass image blocks to `image()`.
 
 Questionnaire waits inside the parent tool call and returns answers or cancellation.
 Late answers are ignored. Child agents do not ask questions; they report missing
@@ -161,6 +163,9 @@ recovery, subagent lifecycle/output/cancel, ambient extension exclusion, and an
 explicitly selected provider extension reaching both the parent and a native
 subagent. The entire smoke runs in ordinary-tool and codemode-only modes, including
 stats, manual compaction and extension commands handled without a model turn.
+It verifies real file read/write/edit and shell effects, image input and MCP images
+in the model request, per-response usage, steering, provider-error recovery and
+explicit child model selection and tool isolation.
 The same script accepts an installed dist/index.js path.
 
 Upgrade decision and verification limits: [Pi 1.3 runtime note](.agents/notes/implemented/feature/2026-10-16-pi-1.3-runtime.md).

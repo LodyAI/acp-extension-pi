@@ -66,7 +66,8 @@ workspace packages or reimplement Pi's executor.
   or taskkill fallback when the native module cannot load or join the Job.
 - MCP names use the reserved mcp_ prefix and must be unique after normalization.
   Support text/image results; reject other content types instead of stringifying
-  them. Preserve error flags and cancellation. Configuration secrets stay
+  them. Preserve error flags and cancellation. Codemode receives the structured
+  MCP result so image blocks remain callable through image(). Configuration secrets stay
   in private temporary files, never native history.
 - Use acp-extension-core contracts. Advertise only implemented capabilities.
   No permission modes, arbitrary plugin compatibility, TUI, Plan Mode, runtime

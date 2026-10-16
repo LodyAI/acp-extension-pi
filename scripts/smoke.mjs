@@ -2,7 +2,14 @@ import assert from "node:assert/strict";
 import { spawn, execFile, execFileSync } from "node:child_process";
 import { once } from "node:events";
 import { createServer } from "node:http";
-import { mkdir, mkdtemp, writeFile, access, copyFile } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  writeFile,
+  readFile,
+  access,
+  copyFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -70,11 +77,14 @@ let codemodeOnly = false;
 let childRequest;
 let releaseChild;
 let heldChild;
+let mainRequest;
+let releaseMain;
 const server = createServer(async (request, response) => {
   let text = "";
   for await (const chunk of request) text += chunk;
   const body = JSON.parse(text);
   bodies.push(body);
+  const completionId = `completion_${bodies.length}`;
   const user = [...body.messages]
     .reverse()
     .find((message) => message.role === "user");
@@ -83,8 +93,41 @@ const server = createServer(async (request, response) => {
       ? user.content
       : (user?.content ?? []).map((block) => block.text ?? "").join("\n");
   const last = body.messages.at(-1);
+  if (content === "STEER_HOLD") {
+    await new Promise((resolve) => {
+      releaseMain = resolve;
+      mainRequest();
+    });
+  }
+  if (content === "MODEL_ERROR") {
+    response.writeHead(400, { "Content-Type": "application/json" });
+    response.end(
+      JSON.stringify({
+        error: {
+          message: "synthetic provider failure",
+          type: "invalid_request_error",
+        },
+      }),
+    );
+    return;
+  }
   let tool;
   if (last?.role !== "tool" && body.tools?.length) {
+    if (content === "WRITE_EFFECT")
+      tool = ["write", { path: "effect.txt", content: "before\n" }];
+    if (content === "READ_EFFECT") tool = ["read", { path: "effect.txt" }];
+    if (content === "EDIT_EFFECT")
+      tool = [
+        "edit",
+        { path: "effect.txt", oldText: "before", newText: "after" },
+      ];
+    if (content === "BASH_EFFECT")
+      tool = [
+        "bash",
+        { command: "echo native-shell-effect > shell-effect.txt" },
+      ];
+    if (content === "READ_MISSING")
+      tool = ["read", { path: "missing-effect.txt" }];
     if (content.includes("ASK_TEST"))
       tool = [
         "questionnaire",
@@ -121,6 +164,22 @@ const server = createServer(async (request, response) => {
           description: "Late reasoning fixture",
         },
       ];
+    if (content === "SUB_MODEL")
+      tool = [
+        "subagent",
+        {
+          task: "CHILD_TEST",
+          description: "Use the selected child model",
+          model: "localtest/fixture",
+        },
+      ];
+    if (codemodeOnly && content === "CHILD_TEST")
+      tool = [
+        "codemode",
+        {
+          code: "text(ALL_TOOLS.some(tool => tool.name === 'subagent' || tool.name === 'questionnaire' || tool.name.startsWith('mcp_')) ? 'CHILD_NOT_ISOLATED' : 'CHILD_ISOLATED');",
+        },
+      ];
     if (content.includes("CANCEL_SUB"))
       tool = [
         "subagent",
@@ -143,16 +202,21 @@ const server = createServer(async (request, response) => {
       ["codemode"],
       "only mode must expose codemode while retaining callable nested tools",
     );
-    if (tool)
+    if (tool && tool[0] !== "codemode")
       tool = [
         "codemode",
-        { code: `text(await tools.${tool[0]}(${JSON.stringify(tool[1])}));` },
+        {
+          code:
+            tool[0] === "mcp_fixture_image"
+              ? "const result = await tools.mcp_fixture_image({}); image(result.content.find(block => block.type === 'image'));"
+              : `text(await tools.${tool[0]}(${JSON.stringify(tool[1])}));`,
+        },
       ];
   }
   response.writeHead(200, { "Content-Type": "text/event-stream" });
   const chunk = (delta, finish_reason = null) =>
     response.write(
-      `data: ${JSON.stringify({ id: "completion", object: "chat.completion.chunk", created: 1, model: "fixture", choices: [{ index: 0, delta, finish_reason }] })}\n\n`,
+      `data: ${JSON.stringify({ id: completionId, object: "chat.completion.chunk", created: 1, model: "fixture", choices: [{ index: 0, delta, finish_reason }] })}\n\n`,
     );
   if (tool) {
     chunk({
@@ -188,6 +252,9 @@ const server = createServer(async (request, response) => {
       chunk({}, content === "CHILD_LENGTH" ? "length" : "stop");
     }
   }
+  response.write(
+    `data: ${JSON.stringify({ id: completionId, choices: [], usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 } })}\n\n`,
+  );
   response.end("data: [DONE]\n\n");
 });
 server.listen(0, "127.0.0.1");
@@ -200,7 +267,14 @@ await writeFile(
         api: "openai-completions",
         apiKey: "synthetic",
         baseUrl: `http://127.0.0.1:${server.address().port}/v1`,
-        models: [{ id: "fixture", contextWindow: 32000, maxTokens: 4096 }],
+        models: [
+          {
+            id: "fixture",
+            input: ["text", "image"],
+            contextWindow: 32000,
+            maxTokens: 4096,
+          },
+        ],
       },
     },
   }),
@@ -304,6 +378,8 @@ async function start(
   subagentEvents = false,
 ) {
   const runEvents = [];
+  const usages = [];
+  const appliedSteers = [];
   const child = spawn(
     process.execPath,
     [
@@ -334,8 +410,12 @@ async function start(
       },
       unstable_createElicitation: (request) => answer(request),
       requestPermission: async () => ({ outcome: { outcome: "cancelled" } }),
-      extNotification: async (_method, params) => {
+      extNotification: async (method, params) => {
         if (isLodySubagentEvent(params)) runEvents.push(params);
+        if (method === LODY_EXTENSION_METHODS.sessionUsageUpdate)
+          usages.push(params);
+        if (method === LODY_EXTENSION_METHODS.sessionSteerApplied)
+          appliedSteers.push(params);
       },
     }),
     ndJsonStream(Writable.toWeb(child.stdin), Readable.toWeb(child.stdout)),
@@ -367,6 +447,8 @@ async function start(
     id,
     configOptions: result.configOptions,
     runEvents,
+    usages,
+    appliedSteers,
     prompt: (text) =>
       client.prompt({ sessionId: id, prompt: [{ type: "text", text }] }),
     close: async () => {
@@ -400,23 +482,96 @@ async function exercise(mode) {
     : {};
   await writeFile(join(profile, "settings.json"), JSON.stringify(settings));
   const a = await start();
-  await observeMainReasoning(
-    a,
-    "REASONING_INITIAL_THINKING",
-    reasoningFixtures.initialThinking,
-    expectedReasoningOutput.initialThinking,
+  await a.prompt("WRITE_EFFECT");
+  assert.equal(await readFile(join(root, "effect.txt"), "utf8"), "before\n");
+  const beforeRead = updates.length;
+  await a.prompt("READ_EFFECT");
+  assert.ok(
+    updates
+      .slice(beforeRead)
+      .some(
+        (update) =>
+          update.title === "read" &&
+          update.status === "completed" &&
+          JSON.stringify(update.rawOutput).includes("before"),
+      ),
   );
-  await observeMainReasoning(
-    a,
-    "REASONING_METADATA_THINKING",
-    reasoningFixtures.metadataThinking,
-    expectedReasoningOutput.metadataThinking,
+  await a.prompt("EDIT_EFFECT");
+  assert.equal(await readFile(join(root, "effect.txt"), "utf8"), "after\n");
+  await a.prompt("BASH_EFFECT");
+  assert.equal(
+    (await readFile(join(root, "shell-effect.txt"), "utf8")).trim(),
+    "native-shell-effect",
   );
-  await observeMainReasoning(
-    a,
-    "REASONING_TEXT_FIRST",
-    reasoningFixtures.textFirst,
-    expectedReasoningOutput.textFirst,
+  const beforeMissing = updates.length;
+  await a.prompt("READ_MISSING");
+  assert.ok(
+    updates
+      .slice(beforeMissing)
+      .some((update) => update.title === "read" && update.status === "failed"),
+  );
+  await a.prompt("RECOVER_TEST");
+  const nativeUsage = a.usages.at(-1).modelUsage["localtest/fixture"];
+  assert.equal(nativeUsage.inputTokens, bodies.length * 10);
+  assert.equal(nativeUsage.outputTokens, bodies.length * 5);
+  const image =
+    "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAEElEQVR4nGP4z8DwHwohFABFzAf5Zsv/OQAAAABJRU5ErkJggg==";
+  const beforeImage = bodies.length;
+  assert.equal(
+    (
+      await a.client.prompt({
+        sessionId: a.id,
+        prompt: [
+          { type: "text", text: "IMAGE_TEST" },
+          { type: "image", mimeType: "image/png", data: image },
+        ],
+      })
+    ).stopReason,
+    "end_turn",
+  );
+  assert.ok(
+    bodies
+      .slice(beforeImage)
+      .some((body) =>
+        body.messages.some(
+          (message) =>
+            Array.isArray(message.content) &&
+            message.content.some((block) => block.type === "image_url"),
+        ),
+      ),
+    JSON.stringify(
+      bodies.slice(beforeImage).map((body) => body.messages.slice(-2)),
+    ),
+  );
+  await assert.rejects(a.prompt("MODEL_ERROR"), (error) => {
+    assert.match(
+      error.data?.details ?? error.message,
+      /synthetic provider failure/,
+    );
+    return true;
+  });
+  await a.prompt("RECOVER_TEST");
+  const heldMain = new Promise((resolve) => {
+    mainRequest = resolve;
+  });
+  const steeringRun = a.prompt("STEER_HOLD");
+  await heldMain;
+  const steering = a.client.extMethod(LODY_EXTENSION_METHODS.sessionSteer, {
+    sessionId: a.id,
+    steerId: "smoke-steer",
+    prompt: [{ type: "text", text: "STEER_APPLIED" }],
+  });
+  // A following native control ACK is an explicit barrier after steer enqueue.
+  await a.client.extMethod(LODY_EXTENSION_METHODS.subagentsList, {
+    sessionId: a.id,
+  });
+  releaseMain();
+  assert.deepEqual(await steering, { outcome: "injected" });
+  assert.equal((await steeringRun).stopReason, "end_turn");
+  assert.ok(
+    a.appliedSteers.some(
+      (event) => event.steerId === "smoke-steer" && event.sessionId === a.id,
+    ),
   );
   await a.prompt("MCP_TEST");
   assert.ok(
@@ -431,6 +586,7 @@ async function exercise(mode) {
         update.title === "mcp_fixture_error" && update.status === "failed",
     ),
   );
+  const beforeMcpImage = bodies.length;
   await a.prompt("MCP_IMAGE");
   assert.ok(
     updates.some(
@@ -441,6 +597,20 @@ async function exercise(mode) {
           (block) => block.type === "content" && block.content.type === "image",
         ),
     ),
+  );
+  assert.ok(
+    bodies
+      .slice(beforeMcpImage)
+      .some((body) =>
+        body.messages
+          .slice(-2)
+          .some(
+            (message) =>
+              Array.isArray(message.content) &&
+              message.content.some((block) => block.type === "image_url"),
+          ),
+      ),
+    "MCP image must reach the model, including through codemode image()",
   );
   const beforeUnsupported = updates.length;
   await a.prompt("MCP_RESOURCE");
@@ -550,6 +720,24 @@ async function exercise(mode) {
   await a.client.cancel({ sessionId: a.id });
   assert.equal((await waiting).stopReason, "cancelled");
   await a.prompt("RECOVER_TEST");
+  await observeMainReasoning(
+    a,
+    "REASONING_INITIAL_THINKING",
+    reasoningFixtures.initialThinking,
+    expectedReasoningOutput.initialThinking,
+  );
+  await observeMainReasoning(
+    a,
+    "REASONING_METADATA_THINKING",
+    reasoningFixtures.metadataThinking,
+    expectedReasoningOutput.metadataThinking,
+  );
+  await observeMainReasoning(
+    a,
+    "REASONING_TEXT_FIRST",
+    reasoningFixtures.textFirst,
+    expectedReasoningOutput.textFirst,
+  );
   const id = a.id;
   await a.close();
   const beforeLoad = updates.length;
@@ -561,6 +749,7 @@ async function exercise(mode) {
     !replay.some(
       (update) =>
         update.sessionUpdate === "user_message_chunk" &&
+        update.content.type === "text" &&
         update.content.text.startsWith("/lody-steer-"),
     ),
   );
@@ -858,6 +1047,13 @@ async function exercise(mode) {
     sseEvents: reasoningSseInput(reasoningFixtures.initialThinking),
     observedAcp: observedChildReasoning,
   });
+  await c.prompt("SUB_MODEL");
+  const selectedChild = await c.client.extMethod(
+    LODY_EXTENSION_METHODS.subagentsList,
+    { sessionId: c.id },
+  );
+  assert.equal(selectedChild.tasks.at(-1).modelId, "localtest/fixture");
+  assert.equal(selectedChild.tasks.at(-1).status, "completed");
   await c.close();
   const broken = join(root, "failing.ts");
   await writeFile(
@@ -993,6 +1189,17 @@ async function exercise(mode) {
     `${JSON.stringify({ fixtures: reasoningObservations }, null, 2)}\n`,
   );
   console.log(`Reasoning SSE artifact: ${reasoningArtifact}`);
+  if (codemodeOnly)
+    assert.ok(
+      bodies.some((body) =>
+        body.messages.some(
+          (message) =>
+            message.role === "tool" &&
+            String(message.content).includes("CHILD_ISOLATED"),
+        ),
+      ),
+      "native child must not inherit parent question, recursive subagent or MCP tools",
+    );
   console.log(
     `Native Pi V1 smoke passed (${codemodeOnly ? "codemode only" : "ordinary tools"}): questions, todo/resume, session list/load, subagent lifecycle/output/cancel, Stop/recovery, ambient exclusion, explicit extension opt-in and handled commands`,
   );
