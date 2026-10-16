@@ -49,7 +49,7 @@ export function registerBuiltinTools(
       if (
         entry.type !== "message" ||
         entry.message.role !== "toolResult" ||
-        entry.message.toolName !== "todo"
+        !["todo", "codemode"].includes(entry.message.toolName)
       )
         continue;
       const snapshot = z
@@ -58,6 +58,13 @@ export function registerBuiltinTools(
       if (snapshot.success) todos = snapshot.data.todos;
     }
     publish(ctx);
+  });
+  // Nested calls are metadata in Pi's native history, not separate tool results.
+  // Keep the todo snapshot on the persisted outer result as well.
+  pi.on("tool_result", (event) => {
+    if (event.toolName !== "codemode") return;
+    const details = z.record(z.string(), z.unknown()).safeParse(event.details);
+    return { details: { ...(details.success ? details.data : {}), todos } };
   });
   pi.registerTool({
     name: "todo",

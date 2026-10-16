@@ -1,6 +1,6 @@
 # Pi ACP adapter
 
-A Lody-owned ACP adapter for the pinned official Pi CLI (0.87.0).
+A Lody-owned ACP adapter for the pinned official Pi CLI (1.3.0).
 
 ```text
 Lody → ACP Adapter → official Pi CLI --mode rpc
@@ -26,9 +26,17 @@ Authenticate/configure models through Pi on the execution machine. ACP
 configuration also exposes model and thinking selection. stdout is ACP;
 stderr contains diagnostics.
 
+`LODY_PI_PATH` can select another Pi executable. It must support the Pi 1.3
+RPC contract and explicit `builtin:codemode` loading, like the bundled runtime.
+
 Extensions are opt-in only. The adapter disables ambient and project
 auto-discovery; nothing outside an explicit -e/--extension path and the
-packaged extension is loaded. `node dist/index.js --list-extensions` performs
+packaged extension and Pi's built-in codemode extension is loaded.
+Codemode stays inactive unless selected through Pi's `defaultTools` setting.
+For example, `{"defaultTools":["+codemode"],"codemode":{"mode":"only"}}`
+routes tools through codemode in both parent and child sessions. Pi's built-in
+MCP discovery remains disabled; ACP supplies MCP servers through the existing bridge.
+`node dist/index.js --list-extensions` performs
 a read-only scan of globally installed extensions and prints candidates as
 JSON; it never executes extension code. The same explicitly selected paths
 are passed to native subagent children; the packaged adapter extension is
@@ -70,7 +78,10 @@ Questionnaire waits inside the parent tool call and returns answers or cancellat
 Late answers are ignored. Child agents do not ask questions; they report missing
 information to the parent. Official TUI Question/Questionnaire code is not loaded.
 
-Todo state is persisted in Pi tool results and reconstructed on resume. ACP
+Todo state is persisted in Pi tool results and reconstructed on resume. Codemode
+results carry the same todo snapshot because nested calls have no separate native
+result messages. Replayed nested calls use Pi's recorded ids, arguments and statuses;
+Pi stores only bounded nested metadata, so full nested results are not recreated. ACP
 checklist updates are a display projection. There is no second todo database.
 Todo completion maps to pending/completed; the tool does not invent in-progress
 status. The /todos terminal window is not provided.
@@ -89,8 +100,9 @@ Child tasks are not detached background jobs or separate Lody sessions.
 
 ## Lifecycle
 
-An ordinary prompt response from Pi acknowledges preflight. The adapter then
-waits for native agent_settled, which covers the supported native model loop and
+Pi's prompt response reports `started`, `queued`, or `handled`. A handled input
+finishes without waiting for a model event; started and queued inputs wait for
+native agent_settled, which covers the supported native model loop and
 awaited tools, retries and automatic compaction. Manual compact instead waits for
 its RPC result. Execution settlement is followed by output delivery and cleanup;
 a new request cannot overtake this barrier.
@@ -147,7 +159,11 @@ cancellation and delivery ordering. The native smoke uses the official CLI and a
 local synthetic model endpoint. It checks question answers/cancellation, todo
 recovery, subagent lifecycle/output/cancel, ambient extension exclusion, and an
 explicitly selected provider extension reaching both the parent and a native
-subagent. The same script accepts an installed dist/index.js path.
+subagent. The entire smoke runs in ordinary-tool and codemode-only modes, including
+stats, manual compaction and extension commands handled without a model turn.
+The same script accepts an installed dist/index.js path.
+
+Upgrade decision and verification limits: [Pi 1.3 runtime note](.agents/notes/implemented/feature/2026-10-16-pi-1.3-runtime.md).
 
 These checks do not establish current Electron visual acceptance or real-provider
 quality. Historical checks of the previous SDK implementation do not validate

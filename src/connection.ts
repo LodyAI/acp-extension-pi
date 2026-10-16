@@ -125,6 +125,20 @@ const toolResultEntrySchema = z.object({
     content: contentSchema,
     details: z.unknown().optional(),
     isError: z.boolean().optional(),
+    nestedCalls: z
+      .object({
+        calls: z.array(
+          z.object({
+            id: z.string(),
+            name: z.string(),
+            arguments: z.record(z.string(), z.unknown()).optional(),
+            status: z.enum(["ok", "error", "unfinished"]),
+            error: z.string().optional(),
+          }),
+        ),
+        complete: z.boolean(),
+      })
+      .optional(),
   }),
 });
 
@@ -446,8 +460,27 @@ export class PiRpcConnection implements AgentConnection {
             ),
             sessionUpdate: "tool_call",
           });
+          for (const call of result?.nestedCalls?.calls ?? [])
+            await this.update({
+              ...this.toolCall(
+                {
+                  toolCallId: call.id,
+                  toolName: call.name,
+                  args: call.arguments,
+                  ...(call.error
+                    ? {
+                        result: {
+                          content: [{ type: "text", text: call.error }],
+                        },
+                      }
+                    : {}),
+                },
+                call.status === "ok" ? "completed" : "failed",
+              ),
+              sessionUpdate: "tool_call",
+            });
           const todos = todosSchema.safeParse(result?.details);
-          if (block.name === "todo" && todos.success)
+          if (["todo", "codemode"].includes(block.name) && todos.success)
             await this.update({
               sessionUpdate: "plan",
               entries: planEntries(todos.data),
@@ -598,10 +631,12 @@ export class PiRpcConnection implements AgentConnection {
           message,
           ...(images.length ? { images } : {}),
         });
-        await run.accepted;
-        // Only the packaged tools are loaded. They complete inside Pi's native
-        // tool await; no extension can start detached work after settlement.
-        await run.settled.promise;
+        const accepted = z
+          .object({ disposition: z.enum(["started", "queued", "handled"]) })
+          .parse(await run.accepted);
+        // A handled input has no model run to settle. Extension-owned detached
+        // work remains outside the ACP request contract.
+        if (accepted.disposition !== "handled") await run.settled.promise;
       }
       // Execution and output delivery are separate barriers.
       await this.rpc.drain();

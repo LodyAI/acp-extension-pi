@@ -120,6 +120,8 @@ export function serve(stream: Stream, piArgs: string[] = []) {
         "rpc",
         "--no-extensions",
         "-e",
+        "builtin:codemode",
+        "-e",
         fileURLToPath(new URL("./extension.js", import.meta.url)),
       ]);
       child = spawn(command, launchArgs, {

@@ -66,11 +66,10 @@ const reasoningSseInput = (deltas) => [
   "[DONE]",
 ];
 const reasoningObservations = [];
+let codemodeOnly = false;
 let childRequest;
 let releaseChild;
-const heldChild = new Promise((resolve) => {
-  childRequest = resolve;
-});
+let heldChild;
 const server = createServer(async (request, response) => {
   let text = "";
   for await (const chunk of request) text += chunk;
@@ -85,7 +84,7 @@ const server = createServer(async (request, response) => {
       : (user?.content ?? []).map((block) => block.text ?? "").join("\n");
   const last = body.messages.at(-1);
   let tool;
-  if (last?.role !== "tool") {
+  if (last?.role !== "tool" && body.tools?.length) {
     if (content.includes("ASK_TEST"))
       tool = [
         "questionnaire",
@@ -137,6 +136,18 @@ const server = createServer(async (request, response) => {
     releaseChild = response;
     childRequest();
     return;
+  }
+  if (codemodeOnly && body.tools?.length) {
+    assert.deepEqual(
+      body.tools.map((entry) => entry.function.name),
+      ["codemode"],
+      "only mode must expose codemode while retaining callable nested tools",
+    );
+    if (tool)
+      tool = [
+        "codemode",
+        { code: `text(await tools.${tool[0]}(${JSON.stringify(tool[1])}));` },
+      ];
   }
   response.writeHead(200, { "Content-Type": "text/event-stream" });
   const chunk = (delta, finish_reason = null) =>
@@ -275,11 +286,12 @@ const observeMainReasoning = async (session, prompt, fixture, expected) => {
     observedAcp: observed,
   });
 };
-let answer = async (request) => {
+const answerQuestions = async (request) => {
   assert.equal(Object.keys(request.requestedSchema.properties).length, 3);
   assert.ok(request.toolCallId);
   return { action: "accept", content: { q0: "Small", q1: "No extra scope" } };
 };
+let answer = answerQuestions;
 const execFileAsync = promisify(execFile);
 const entry =
   process.argv[2] ??
@@ -374,7 +386,19 @@ const deadline = setTimeout(
   // windows-11-arm runners take roughly triple the x64 wall time.
   180_000,
 );
-try {
+async function exercise(mode) {
+  codemodeOnly = mode;
+  deadline.refresh();
+  updates.length = 0;
+  bodies.length = 0;
+  answer = answerQuestions;
+  heldChild = new Promise((resolve) => {
+    childRequest = resolve;
+  });
+  const settings = codemodeOnly
+    ? { defaultTools: ["+codemode"], codemode: { mode: "only" } }
+    : {};
+  await writeFile(join(profile, "settings.json"), JSON.stringify(settings));
   const a = await start();
   await observeMainReasoning(
     a,
@@ -562,6 +586,14 @@ try {
   );
   await loaded.close();
   const before = updates.length;
+  // Make manual compaction deterministic without changing the earlier length test.
+  await writeFile(
+    join(profile, "settings.json"),
+    JSON.stringify({
+      ...settings,
+      compaction: { enabled: false, keepRecentTokens: 256 },
+    }),
+  );
   const b = await start(id);
   assert.ok(
     updates
@@ -580,6 +612,31 @@ try {
       .length,
     0,
   );
+  const beforeStats = updates.length;
+  assert.equal((await b.prompt("/stats")).stopReason, "end_turn");
+  assert.ok(
+    updates
+      .slice(beforeStats)
+      .some(
+        (update) =>
+          update.sessionUpdate === "agent_message_chunk" &&
+          update.content.text.includes("Pi session usage:"),
+      ),
+  );
+  const beforeCompact = updates.length;
+  assert.equal(
+    (await b.prompt("/compact Keep the task checklist.")).stopReason,
+    "end_turn",
+  );
+  assert.ok(
+    updates
+      .slice(beforeCompact)
+      .some(
+        (update) =>
+          update.sessionUpdate === "agent_message_chunk" &&
+          update.content.text === "Context compacted.",
+      ),
+  );
   const closingChild = new Promise((resolve) => {
     childRequest = resolve;
   });
@@ -588,6 +645,7 @@ try {
   const childDisconnected = once(releaseChild, "close");
   await b.close();
   await Promise.all([interrupted, childDisconnected]);
+  await writeFile(join(profile, "settings.json"), JSON.stringify(settings));
   if (process.platform === "win32") {
     for (const crash of ["pi", "adapter"]) {
       const c = await start();
@@ -693,7 +751,7 @@ try {
   const plugin = join(root, "opted-in.ts");
   await writeFile(
     plugin,
-    `export default (pi) => pi.registerProvider("extensiontest", ${JSON.stringify(
+    `export default (pi) => { pi.registerProvider("extensiontest", ${JSON.stringify(
       {
         api: "openai-completions",
         apiKey: "synthetic",
@@ -710,7 +768,10 @@ try {
           },
         ],
       },
-    )});`,
+    )}); pi.registerCommand("lody-smoke-handled", {
+      description: "Synthetic command without a model turn",
+      handler: async (_args, ctx) => ctx.ui.notify("HANDLED_COMMAND", "info"),
+    }); };`,
   );
   const c = await start(
     undefined,
@@ -724,6 +785,13 @@ try {
       ?.find((option) => option.id === "model" || option.category === "model")
       ?.options.some((option) => option.value === "extensiontest/fixture"),
     "extension provider model is advertised",
+  );
+  const beforeHandled = bodies.length;
+  assert.equal((await c.prompt("/lody-smoke-handled")).stopReason, "end_turn");
+  assert.equal(
+    bodies.length,
+    beforeHandled,
+    "handled command must not start a model request",
   );
   await c.prompt("SUB_TEST");
   const extensionTasks = await c.client.extMethod(
@@ -926,8 +994,11 @@ try {
   );
   console.log(`Reasoning SSE artifact: ${reasoningArtifact}`);
   console.log(
-    "Native Pi V1 smoke passed: questions, todo/resume, session list/load, subagent lifecycle/output/cancel, Stop/recovery, ambient exclusion and explicit extension opt-in",
+    `Native Pi V1 smoke passed (${codemodeOnly ? "codemode only" : "ordinary tools"}): questions, todo/resume, session list/load, subagent lifecycle/output/cancel, Stop/recovery, ambient exclusion, explicit extension opt-in and handled commands`,
   );
+}
+try {
+  for (const mode of [false, true]) await exercise(mode);
 } finally {
   clearTimeout(deadline);
   for (const child of children) child.kill("SIGTERM");

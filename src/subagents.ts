@@ -70,6 +70,8 @@ export function registerSubagents(
         "-p",
         "--no-session",
         "--no-extensions",
+        "-e",
+        "builtin:codemode",
         ...extensions.flatMap((path) => ["-e", path]),
         "--model",
         model,
