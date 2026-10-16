@@ -382,6 +382,266 @@ describe("native Pi connection", () => {
     expect(p.usages).toEqual([]);
     p.client.close();
   });
+  describe("keeps each native content block contiguous", () => {
+    const block = (type: string, delta?: string) => ({
+      type: "message_update",
+      assistantMessageEvent: {
+        type,
+        ...(delta === undefined ? {} : { delta }),
+      },
+    });
+    const chunk = (update: acp.SessionNotification["update"]) =>
+      (update.sessionUpdate === "agent_message_chunk" ||
+        update.sessionUpdate === "agent_thought_chunk") &&
+      update.content.type === "text"
+        ? [
+            [
+              update.sessionUpdate === "agent_message_chunk"
+                ? "text"
+                : "thought",
+              update.content.text,
+            ],
+          ]
+        : [];
+    const chunks = (p: ReturnType<typeof peer>) =>
+      p.updates.flatMap((n) => chunk(n.update));
+    /** Runs one prompt whose default first assistant message streams `events`. */
+    async function stream(
+      events: Record<string, unknown>[],
+      stopReason = "stop",
+    ) {
+      const p = peer();
+      await start(p);
+      const done = p.client.prompt(prompt);
+      await p.promptReceived.promise;
+      for (const event of events) p.emit(event);
+      p.emit({ type: "message_end", message: response("r1", { stopReason }) });
+      p.finish();
+      const result = await done;
+      p.close();
+      return { chunks: chunks(p), updates: p.updates, result };
+    }
+
+    it("defers reasoning that resumes inside a text run", async () => {
+      const { chunks: emitted } = await stream([
+        block("thinking_start"),
+        block("thinking_delta", "a"),
+        block("text_start"),
+        block("text_delta", "这个"),
+        block("thinking_delta", "b"),
+        block("text_delta", " alpine"),
+        block("text_end"),
+      ]);
+      expect(emitted).toEqual([
+        ["thought", "a"],
+        ["text", "这个"],
+        ["text", " alpine"],
+        ["thought", "b"],
+      ]);
+    });
+
+    it("defers reasoning that first becomes visible after text starts", async () => {
+      // pi-ai can open a metadata-only thinking block before any text.
+      const { chunks: emitted } = await stream([
+        block("thinking_start"),
+        block("text_start"),
+        block("text_delta", "这个"),
+        block("thinking_delta", "late"),
+        block("text_delta", " alpine"),
+      ]);
+      expect(emitted).toEqual([
+        ["text", "这个"],
+        ["text", " alpine"],
+        ["thought", "late"],
+      ]);
+    });
+
+    it("releases reasoning deferred during one text run as one chunk", async () => {
+      const { chunks: emitted } = await stream([
+        block("text_delta", "a"),
+        block("thinking_delta", "x"),
+        block("text_delta", "b"),
+        block("thinking_delta", "y"),
+        block("text_end"),
+        block("thinking_end"),
+      ]);
+      expect(emitted).toEqual([
+        ["text", "a"],
+        ["text", "b"],
+        ["thought", "xy"],
+      ]);
+    });
+
+    it("releases deferred reasoning before a tool call", async () => {
+      const { updates } = await stream([
+        block("text_delta", "Run it"),
+        block("thinking_delta", "b"),
+        block("toolcall_start"),
+        {
+          type: "tool_execution_start",
+          toolCallId: "read",
+          toolName: "read",
+          args: { path: "a.ts" },
+        },
+      ]);
+      const order = ["agent_message_chunk", "agent_thought_chunk", "tool_call"];
+      expect(
+        updates
+          .map((n) => n.update.sessionUpdate)
+          .filter((kind) => order.includes(kind)),
+      ).toEqual(order);
+    });
+
+    it("releases deferred reasoning at message_end when the stream aborts before *_end", async () => {
+      const { chunks: emitted, result } = await stream(
+        [
+          block("thinking_delta", "a"),
+          block("text_delta", "partial"),
+          block("thinking_delta", "late"),
+        ],
+        "aborted",
+      );
+      expect(result).toEqual({ stopReason: "cancelled" });
+      expect(emitted).toEqual([
+        ["thought", "a"],
+        ["text", "partial"],
+        ["thought", "late"],
+      ]);
+    });
+
+    it("drains deferred reasoning before reporting a provider error", async () => {
+      const p = peer();
+      await start(p);
+      const done = p.client.prompt(prompt);
+      const failed = expect(done).rejects.toThrow("synthetic stream failure");
+      await p.promptReceived.promise;
+      p.emit(block("thinking_delta", "a"));
+      p.emit(block("text_delta", "partial"));
+      p.emit(block("thinking_delta", "late"));
+      p.emit({
+        type: "message_end",
+        message: response("r1", {
+          stopReason: "error",
+          errorMessage: "synthetic stream failure",
+        }),
+      });
+      p.finish();
+      await failed;
+      expect(chunks(p)).toEqual([
+        ["thought", "a"],
+        ["text", "partial"],
+        ["thought", "late"],
+      ]);
+      p.close();
+    });
+
+    it("keeps sequential blocks in arrival order", async () => {
+      const { chunks: emitted } = await stream([
+        block("thinking_delta", "a"),
+        block("thinking_delta", "b"),
+        block("thinking_end"),
+        block("text_delta", "c"),
+        block("text_delta", "d"),
+        block("text_end"),
+      ]);
+      expect(emitted).toEqual([
+        ["thought", "a"],
+        ["thought", "b"],
+        ["text", "c"],
+        ["text", "d"],
+      ]);
+    });
+
+    it("never carries a text run into the next assistant message", async () => {
+      const { chunks: emitted } = await stream([
+        block("thinking_delta", "a"),
+        block("text_delta", "b"),
+        block("thinking_delta", "c"),
+        {
+          type: "message_end",
+          message: response("r0", { stopReason: "stop" }),
+        },
+        { type: "message_start", message: { role: "assistant" } },
+        block("thinking_delta", "d"),
+        block("text_delta", "e"),
+      ]);
+      expect(emitted).toEqual([
+        ["thought", "a"],
+        ["text", "b"],
+        ["thought", "c"],
+        ["thought", "d"],
+        ["text", "e"],
+      ]);
+    });
+
+    it("sequences negotiated subagent output per child message", async () => {
+      const p = peer();
+      p.host.subagentEvents = true;
+      const outputs: { update: unknown; messageId?: unknown }[] = [];
+      const done = deferred();
+      p.host.extension = async (method, event) => {
+        if (method !== LODY_SUBAGENT_EVENT_METHOD) return;
+        if (event.type === "output")
+          outputs.push({ update: event.update, messageId: event.messageId });
+        if (
+          event.type === "snapshot" &&
+          (event.snapshot as { state: string }).state === "completed"
+        )
+          done.resolve();
+      };
+      await start(p);
+      const task = {
+        taskId: "child",
+        status: "in_progress",
+        description: "Inspect sources",
+      };
+      const child = (messageId: string, event: unknown) =>
+        p.emit(
+          lodyEvent({
+            type: "lody_subagent_output",
+            taskId: "child",
+            messageId,
+            event,
+          }),
+        );
+      p.emit(
+        lodyEvent({
+          type: "lody_subagent",
+          event: "started",
+          task,
+          state: "running",
+        }),
+      );
+      child("m1", block("thinking_delta", "a"));
+      child("m1", block("text_delta", "x"));
+      child("m1", block("thinking_delta", "b"));
+      child("m1", block("text_delta", "y"));
+      // An aborted child message ends without *_end; the next message flushes it.
+      child("m2", block("text_delta", "z"));
+      p.emit(
+        lodyEvent({
+          type: "lody_subagent",
+          event: "updated",
+          task: { ...task, status: "completed" },
+          state: "completed",
+        }),
+      );
+      await done.promise;
+      expect(
+        outputs.map(({ update, messageId }) => [
+          messageId,
+          ...chunk(update as acp.SessionNotification["update"]).flat(),
+        ]),
+      ).toEqual([
+        ["m1", "thought", "a"],
+        ["m1", "text", "x"],
+        ["m1", "text", "y"],
+        ["m1", "thought", "b"],
+        ["m2", "text", "z"],
+      ]);
+      p.client.close();
+    });
+  });
   it.each(["reply-error", "eof"])(
     "distinguishes optional initial stats failure from a dead Pi transport (%s)",
     async (failure) => {
