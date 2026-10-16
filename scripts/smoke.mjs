@@ -29,6 +29,43 @@ const external = `import {writeFileSync} from 'node:fs'; writeFileSync(${JSON.st
 await writeFile(join(profile, "extensions", "unwanted.ts"), external);
 await writeFile(join(root, ".pi", "extensions", "unwanted.ts"), external);
 const bodies = [];
+const reasoningFixtures = {
+  initialThinking: [
+    { reasoning_content: "a" },
+    { content: "这个" },
+    { reasoning_content: "b" },
+    { content: " alpine" },
+  ],
+  metadataThinking: [
+    { reasoning_details: [{ type: "reasoning.text", text: "opaque" }] },
+    { content: "这个" },
+    { reasoning_content: "late" },
+    { content: " alpine" },
+  ],
+  textFirst: [
+    { content: "这个" },
+    { reasoning_content: "late" },
+    { content: " alpine" },
+  ],
+};
+const reasoningSseInput = (deltas) => [
+  ...deltas.map((delta) => ({
+    id: "completion",
+    object: "chat.completion.chunk",
+    created: 1,
+    model: "fixture",
+    choices: [{ index: 0, delta, finish_reason: null }],
+  })),
+  {
+    id: "completion",
+    object: "chat.completion.chunk",
+    created: 1,
+    model: "fixture",
+    choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
+  },
+  "[DONE]",
+];
+const reasoningObservations = [];
 let childRequest;
 let releaseChild;
 const heldChild = new Promise((resolve) => {
@@ -77,6 +114,14 @@ const server = createServer(async (request, response) => {
         "subagent",
         { task: "CHILD_TEST", description: "Inspect child task" },
       ];
+    if (content === "SUBAGENT_REASONING_FIXTURE")
+      tool = [
+        "subagent",
+        {
+          task: "CHILD_REASONING_INITIAL",
+          description: "Late reasoning fixture",
+        },
+      ];
     if (content.includes("CANCEL_SUB"))
       tool = [
         "subagent",
@@ -112,11 +157,25 @@ const server = createServer(async (request, response) => {
     });
     chunk({}, "tool_calls");
   } else {
-    chunk({
-      role: "assistant",
-      content: content === "CHILD_TEST" ? "CHILD_RESULT" : "DONE",
-    });
-    chunk({}, content === "CHILD_LENGTH" ? "length" : "stop");
+    const reasoningFixture =
+      content === "REASONING_INITIAL_THINKING" ||
+      content === "CHILD_REASONING_INITIAL"
+        ? reasoningFixtures.initialThinking
+        : content === "REASONING_METADATA_THINKING"
+          ? reasoningFixtures.metadataThinking
+          : content === "REASONING_TEXT_FIRST"
+            ? reasoningFixtures.textFirst
+            : undefined;
+    if (reasoningFixture) {
+      for (const delta of reasoningFixture) chunk(delta);
+      chunk({}, "stop");
+    } else {
+      chunk({
+        role: "assistant",
+        content: content === "CHILD_TEST" ? "CHILD_RESULT" : "DONE",
+      });
+      chunk({}, content === "CHILD_LENGTH" ? "length" : "stop");
+    }
   }
   response.end("data: [DONE]\n\n");
 });
@@ -137,6 +196,85 @@ await writeFile(
 );
 const children = new Set();
 const updates = [];
+const acpReasoningChunks = (events) =>
+  events
+    .filter(
+      (update) =>
+        (update.sessionUpdate === "agent_message_chunk" ||
+          update.sessionUpdate === "agent_thought_chunk") &&
+        update.content?.type === "text",
+    )
+    .map(({ sessionUpdate, content }) => ({ sessionUpdate, content }));
+const assertReasoningOutput = (events, expected) => {
+  const observed = acpReasoningChunks(events);
+  assert.deepEqual(observed, expected);
+  assert.equal(
+    observed
+      .filter((update) => update.sessionUpdate === "agent_message_chunk")
+      .map((update) => update.content.text)
+      .join(""),
+    "这个 alpine",
+  );
+  return observed;
+};
+const expectedReasoningOutput = {
+  initialThinking: [
+    {
+      sessionUpdate: "agent_thought_chunk",
+      content: { type: "text", text: "a" },
+    },
+    {
+      sessionUpdate: "agent_message_chunk",
+      content: { type: "text", text: "这个" },
+    },
+    {
+      sessionUpdate: "agent_message_chunk",
+      content: { type: "text", text: " alpine" },
+    },
+    {
+      sessionUpdate: "agent_thought_chunk",
+      content: { type: "text", text: "b" },
+    },
+  ],
+  metadataThinking: [
+    {
+      sessionUpdate: "agent_message_chunk",
+      content: { type: "text", text: "这个" },
+    },
+    {
+      sessionUpdate: "agent_message_chunk",
+      content: { type: "text", text: " alpine" },
+    },
+    {
+      sessionUpdate: "agent_thought_chunk",
+      content: { type: "text", text: "late" },
+    },
+  ],
+  textFirst: [
+    {
+      sessionUpdate: "agent_message_chunk",
+      content: { type: "text", text: "这个" },
+    },
+    {
+      sessionUpdate: "agent_message_chunk",
+      content: { type: "text", text: " alpine" },
+    },
+    {
+      sessionUpdate: "agent_thought_chunk",
+      content: { type: "text", text: "late" },
+    },
+  ],
+};
+const observeMainReasoning = async (session, prompt, fixture, expected) => {
+  const offset = updates.length;
+  await session.prompt(prompt);
+  const observed = assertReasoningOutput(updates.slice(offset), expected);
+  reasoningObservations.push({
+    prompt,
+    sseEvents: reasoningSseInput(fixture),
+    observedAcp: observed,
+  });
+};
 let answer = async (request) => {
   assert.equal(Object.keys(request.requestedSchema.properties).length, 3);
   assert.ok(request.toolCallId);
@@ -238,6 +376,24 @@ const deadline = setTimeout(
 );
 try {
   const a = await start();
+  await observeMainReasoning(
+    a,
+    "REASONING_INITIAL_THINKING",
+    reasoningFixtures.initialThinking,
+    expectedReasoningOutput.initialThinking,
+  );
+  await observeMainReasoning(
+    a,
+    "REASONING_METADATA_THINKING",
+    reasoningFixtures.metadataThinking,
+    expectedReasoningOutput.metadataThinking,
+  );
+  await observeMainReasoning(
+    a,
+    "REASONING_TEXT_FIRST",
+    reasoningFixtures.textFirst,
+    expectedReasoningOutput.textFirst,
+  );
   await a.prompt("MCP_TEST");
   assert.ok(
     updates.some((update) =>
@@ -597,6 +753,43 @@ try {
         event.sessionId === c.id && event.runId === c.runEvents[0].runId,
     ),
   );
+  const childReasoningOffset = c.runEvents.length;
+  await c.prompt("SUBAGENT_REASONING_FIXTURE");
+  const childReasoningEvents = c.runEvents.slice(childReasoningOffset);
+  const childReasoningRun = childReasoningEvents.find(
+    (event) =>
+      event.type === "snapshot" &&
+      event.snapshot.state === "running" &&
+      event.snapshot.description === "Late reasoning fixture",
+  );
+  assert.ok(childReasoningRun, "negotiated child run started");
+  const childReasoningOutput = childReasoningEvents.filter(
+    (event) =>
+      event.type === "output" &&
+      event.sessionId === c.id &&
+      event.runId === childReasoningRun.runId &&
+      (event.update.sessionUpdate === "agent_message_chunk" ||
+        event.update.sessionUpdate === "agent_thought_chunk"),
+  );
+  const childMessageIds = new Set(
+    childReasoningOutput.map((event) => event.messageId),
+  );
+  assert.equal(childMessageIds.size, 1);
+  const [childMessageId] = childMessageIds;
+  assert.ok(childMessageId, "child output carries its message ID");
+  const observedChildReasoning = assertReasoningOutput(
+    childReasoningOutput
+      .filter((event) => event.messageId === childMessageId)
+      .map((event) => event.update),
+    expectedReasoningOutput.initialThinking,
+  );
+  reasoningObservations.push({
+    prompt: "SUBAGENT_REASONING_FIXTURE",
+    runId: childReasoningRun.runId,
+    messageId: childMessageId,
+    sseEvents: reasoningSseInput(reasoningFixtures.initialThinking),
+    observedAcp: observedChildReasoning,
+  });
   await c.close();
   const broken = join(root, "failing.ts");
   await writeFile(
@@ -726,6 +919,12 @@ try {
     const names = body.tools?.map((tool) => tool.function.name) ?? [];
     assert.ok(!names.includes("questionnaire") && !names.includes("subagent"));
   }
+  const reasoningArtifact = join(root, "reasoning-sse-observations.json");
+  await writeFile(
+    reasoningArtifact,
+    `${JSON.stringify({ fixtures: reasoningObservations }, null, 2)}\n`,
+  );
+  console.log(`Reasoning SSE artifact: ${reasoningArtifact}`);
   console.log(
     "Native Pi V1 smoke passed: questions, todo/resume, session list/load, subagent lifecycle/output/cancel, Stop/recovery, ambient exclusion and explicit extension opt-in",
   );
