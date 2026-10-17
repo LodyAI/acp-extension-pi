@@ -136,7 +136,6 @@ const toolResultEntrySchema = z.object({
             error: z.string().optional(),
           }),
         ),
-        complete: z.boolean(),
       })
       .optional(),
   }),
