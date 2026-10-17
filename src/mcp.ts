@@ -8,8 +8,17 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import {
   CallToolResultSchema,
+  TextContentSchema,
+  ImageContentSchema,
   type CallToolResult,
 } from "@modelcontextprotocol/sdk/types.js";
+import { z } from "zod";
+
+const outputSchema = z.toJSONSchema(
+  CallToolResultSchema.extend({
+    content: z.array(z.union([TextContentSchema, ImageContentSchema])),
+  }).pick({ content: true, structuredContent: true, isError: true }),
+) as ToolDefinition["outputSchema"];
 
 export const MCP_CONFIG_ENV = "LODY_PI_MCP_CONFIG";
 type StdioServer = Extract<McpServer, { command: string }>;
@@ -70,6 +79,7 @@ export async function registerMcpTools(pi: ExtensionAPI): Promise<void> {
             label: `${server.name}: ${tool.name}`,
             description: tool.description ?? tool.name,
             parameters: tool.inputSchema as ToolDefinition["parameters"],
+            outputSchema,
             async execute(_id, args, signal) {
               // The SDK validates this schema but types the result as a compatibility union.
               const result = (await client.callTool(
@@ -92,7 +102,19 @@ export async function registerMcpTools(pi: ExtensionAPI): Promise<void> {
                   type: "text",
                   text: JSON.stringify(result.structuredContent),
                 });
-              return { content, details: { isError: result.isError === true } };
+              return {
+                content,
+                details: { isError: result.isError === true },
+                // Codemode receives structuredContent for tools with an output
+                // schema; keep the MCP blocks so scripts can call image().
+                structuredContent: z.json().parse({
+                  content: result.content,
+                  ...(result.structuredContent
+                    ? { structuredContent: result.structuredContent }
+                    : {}),
+                  isError: result.isError === true,
+                }),
+              };
             },
           });
         }

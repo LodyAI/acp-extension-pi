@@ -56,7 +56,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
           {
             type: "image",
             mimeType: "image/png",
-            data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl6hS8AAAAASUVORK5CYII=",
+            data: "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAEElEQVR4nGP4z8DwHwohFABFzAf5Zsv/OQAAAABJRU5ErkJggg==",
           },
         ]
       : [

@@ -95,7 +95,10 @@ function peer() {
       id: request.id,
       command: request.type,
       success: !error,
-      data,
+      data:
+        data === undefined && request.type === "prompt" && !error
+          ? { disposition: "started" }
+          : data,
       error,
     });
   }
@@ -291,6 +294,20 @@ const lodyEvent = (payload: Record<string, unknown>) => ({
 });
 
 describe("native Pi connection", () => {
+  it("completes handled input without a model event and admits the next prompt", async () => {
+    const p = peer();
+    await start(p);
+    p.setPrompt((request) => p.reply(request, { disposition: "handled" }));
+    expect(await p.client.prompt(prompt)).toEqual({ stopReason: "end_turn" });
+    p.setPrompt((request) => {
+      p.reply(request, { disposition: "started" });
+      p.emit({ type: "agent_start" });
+      p.finish();
+    });
+    expect(await p.client.prompt(prompt)).toEqual({ stopReason: "end_turn" });
+    p.close();
+  });
+
   it("publishes negotiated child histories without legacy task cards or accounting deltas", async () => {
     const p = peer();
     p.host.subagentEvents = true;

@@ -6,7 +6,7 @@ workspace packages or reimplement Pi's executor.
 - Launch the pinned official Pi CLI in RPC mode. There is no custom SDK worker,
   AgentSession facade, generic call owner or background execution scheduler.
 - Ambient and project extension discovery stay disabled. Only the packaged
-  extension and explicit -e/--extension absolute paths are loaded; selections
+  extension, Pi's builtin:codemode and explicit -e/--extension absolute paths are loaded; selections
   are default-off and bounded. `--list-extensions` scans globally installed
   extensions read-only without executing them. Child Pi processes disable
   discovery too and inherit the same explicit list, never the packaged
@@ -19,7 +19,8 @@ workspace packages or reimplement Pi's executor.
 - Only the main agent asks questions. Questionnaire handles one or many questions
   through Lody form elicitation. Stop closes questions; late answers cannot enter
   another request. Do not implement terminal UI.
-- Todo snapshots live in Pi tool results. Reconstruct on native resume and publish
+- Todo snapshots live in Pi tool results, including outer codemode results for nested
+  calls. Reconstruct on native resume and publish
   ACP checklist updates to Lody; never create another todo store or bidirectional sync.
 - Subagent execution owns task ids, status, output and child cancellation. Lody
   receives Core task metadata and list/output/cancel methods. Parent tools await
@@ -31,8 +32,8 @@ workspace packages or reimplement Pi's executor.
 - Negotiated Core subagent events replace legacy live task cards, not execution
   ownership or billing. Stream child JSONL through the adapter; run IDs do not
   authorize legacy task-ID controls. Keep non-negotiated clients compatible.
-- Ordinary prompt ACK means preflight passed, not completion. With only these
-  packaged tools, agent_settled terminates native model work including retries and
+- Pi 1.3 prompt disposition is authoritative: handled completes without waiting
+  for a model event; started/queued wait for agent_settled, including retries and
   automatic compaction. Explicit compact waits for its own RPC response. Both
   drain output and finish cleanup before admitting another request.
 - Abort must not overtake prompt preflight. Clear queues, cancel questions, await
@@ -65,7 +66,8 @@ workspace packages or reimplement Pi's executor.
   or taskkill fallback when the native module cannot load or join the Job.
 - MCP names use the reserved mcp_ prefix and must be unique after normalization.
   Support text/image results; reject other content types instead of stringifying
-  them. Preserve error flags and cancellation. Configuration secrets stay
+  them. Preserve error flags and cancellation. Codemode receives the structured
+  MCP result so image blocks remain callable through image(). Configuration secrets stay
   in private temporary files, never native history.
 - Use acp-extension-core contracts. Advertise only implemented capabilities.
   No permission modes, arbitrary plugin compatibility, TUI, Plan Mode, runtime
