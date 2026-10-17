@@ -23,6 +23,7 @@ import {
 } from "./usage.js";
 import { PI_RPC_VERSION } from "./version.js";
 import { QUESTION_PREFIX, questionsSchema } from "./builtin-tools.js";
+import { BlockDeltaSequencer, type BlockDelta } from "./block-deltas.js";
 
 const modelSchema = z.object({
   provider: z.string(),
@@ -78,6 +79,10 @@ const todosSchema = z.object({
   todos: z.array(z.object({ text: z.string(), done: z.boolean() })),
 });
 const userContentSchema = z.union([z.string(), contentSchema]);
+const assistantMessageEventSchema = z.object({
+  type: z.string(),
+  delta: z.string().optional(),
+});
 const entriesSchema = z.object({
   entries: z.array(
     z.object({ id: z.string(), parentId: z.string().nullable() }).passthrough(),
@@ -123,6 +128,34 @@ const toolResultEntrySchema = z.object({
   }),
 });
 
+function deltaUpdate(delta: BlockDelta): acp.SessionNotification["update"] {
+  const content = { type: "text" as const, text: delta.text };
+  return delta.kind === "text"
+    ? { sessionUpdate: "agent_message_chunk", content }
+    : { sessionUpdate: "agent_thought_chunk", content };
+}
+async function sequenceDelta(
+  sequencer: BlockDeltaSequencer,
+  event: z.infer<typeof assistantMessageEventSchema>,
+  emit: (deltas: BlockDelta[]) => Promise<void>,
+): Promise<void> {
+  switch (event.type) {
+    case "text_delta":
+    case "thinking_delta":
+      if (event.delta)
+        await emit(
+          sequencer.push({
+            kind: event.type === "text_delta" ? "text" : "thinking",
+            text: event.delta,
+          }),
+        );
+      return;
+    case "text_end":
+    case "toolcall_start":
+      await emit(sequencer.close());
+      return;
+  }
+}
 function planEntries({ todos }: z.infer<typeof todosSchema>): acp.PlanEntry[] {
   return todos.map((todo) => ({
     content: todo.text,
@@ -196,6 +229,12 @@ export class PiRpcConnection implements AgentConnection {
     }
     return runs;
   }
+  /** Child message currently streaming per subagent task. */
+  private readonly subagentDeltas = new Map<
+    string,
+    { messageId?: string; sequencer: BlockDeltaSequencer }
+  >();
+  private readonly blockDeltas = new BlockDeltaSequencer();
   private readonly rpc: PiTransport;
   private sessionId = "";
   private cwd = "";
@@ -708,6 +747,37 @@ export class PiRpcConnection implements AgentConnection {
     return { message: text.join("\n\n"), images };
   }
 
+  private async emitDeltas(deltas: BlockDelta[]): Promise<void> {
+    for (const delta of deltas) await this.update(deltaUpdate(delta));
+  }
+
+  private async emitSubagentDeltas(
+    taskId: string,
+    messageId: string | undefined,
+    deltas: BlockDelta[],
+  ): Promise<void> {
+    if (!deltas.length || !this.host.subagentEvents || !this.sessionId) return;
+    const runs = this.subagents();
+    for (const delta of deltas)
+      await runs.output(
+        taskId,
+        deltaUpdate(delta),
+        messageId === undefined ? {} : { messageId },
+      );
+  }
+
+  /** Releases a subagent task's deferred deltas when its child message ends. */
+  private async flushSubagentDeltas(taskId: string): Promise<void> {
+    const current = this.subagentDeltas.get(taskId);
+    if (!current) return;
+    this.subagentDeltas.delete(taskId);
+    await this.emitSubagentDeltas(
+      taskId,
+      current.messageId,
+      current.sequencer.close(),
+    );
+  }
+
   private update(update: acp.SessionNotification["update"]): Promise<void> {
     if (!this.sessionId || !this.steerCommand) return Promise.resolve();
     return this.host.update({ sessionId: this.sessionId, update });
@@ -771,6 +841,9 @@ export class PiRpcConnection implements AgentConnection {
         return;
       }
       if (payload.type === "lody_usage") {
+        // Forwarded at the child's assistant message_end.
+        if (typeof payload.taskId === "string")
+          await this.flushSubagentDeltas(payload.taskId);
         const usage = z
           .object({ taskId: z.string(), message: piAssistantUsageSchema })
           .safeParse(payload);
@@ -791,6 +864,8 @@ export class PiRpcConnection implements AgentConnection {
           })
           .passthrough()
           .parse(payload.task);
+        if (task.status !== "in_progress")
+          await this.flushSubagentDeltas(task.taskId);
         if (this.host.subagentEvents && this.sessionId) {
           const runs = this.subagents();
           if (payload.event === "started") {
@@ -856,25 +931,26 @@ export class PiRpcConnection implements AgentConnection {
         const childEvent = z
           .record(z.string(), z.unknown())
           .parse(payload.event);
-        const runs = this.subagents();
         if (childEvent.type === "message_update") {
-          const delta = z
-            .object({ type: z.string(), delta: z.string().optional() })
-            .parse(childEvent.assistantMessageEvent);
-          if (delta.type === "text_delta" || delta.type === "thinking_delta")
-            await runs.output(
-              payload.taskId,
-              {
-                sessionUpdate:
-                  delta.type === "text_delta"
-                    ? "agent_message_chunk"
-                    : "agent_thought_chunk",
-                content: { type: "text", text: delta.delta ?? "" },
-              },
-              typeof payload.messageId === "string"
-                ? { messageId: payload.messageId }
-                : {},
-            );
+          const taskId = payload.taskId;
+          const messageId =
+            typeof payload.messageId === "string"
+              ? payload.messageId
+              : undefined;
+          let current = this.subagentDeltas.get(taskId);
+          if (current && current.messageId !== messageId) {
+            await this.flushSubagentDeltas(taskId);
+            current = undefined;
+          }
+          if (!current) {
+            current = { messageId, sequencer: new BlockDeltaSequencer() };
+            this.subagentDeltas.set(taskId, current);
+          }
+          await sequenceDelta(
+            current.sequencer,
+            assistantMessageEventSchema.parse(childEvent.assistantMessageEvent),
+            (deltas) => this.emitSubagentDeltas(taskId, messageId, deltas),
+          );
         } else {
           await this.tool(childEvent, payload.taskId);
         }
@@ -957,6 +1033,7 @@ export class PiRpcConnection implements AgentConnection {
         run.modelSettled = false;
         break;
       case "agent_settled":
+        await this.emitDeltas(this.blockDeltas.close());
         run.modelSettled = true;
         run.settled.resolve();
         break;
@@ -992,30 +1069,20 @@ export class PiRpcConnection implements AgentConnection {
           );
         }
         if (message.role === "assistant") {
+          await this.emitDeltas(this.blockDeltas.close());
           run.error = undefined;
           run.stopReason = undefined;
           await this.readState();
         }
         break;
       }
-      case "message_update": {
-        const delta = z
-          .object({ type: z.string(), delta: z.string().optional() })
-          .parse(event.assistantMessageEvent);
-        if (
-          (delta.type === "text_delta" || delta.type === "thinking_delta") &&
-          delta.delta
-        ) {
-          await this.update({
-            sessionUpdate:
-              delta.type === "text_delta"
-                ? "agent_message_chunk"
-                : "agent_thought_chunk",
-            content: { type: "text", text: delta.delta },
-          });
-        }
+      case "message_update":
+        await sequenceDelta(
+          this.blockDeltas,
+          assistantMessageEventSchema.parse(event.assistantMessageEvent),
+          (deltas) => this.emitDeltas(deltas),
+        );
         break;
-      }
       case "message_end": {
         const message = z
           .object({
@@ -1025,6 +1092,8 @@ export class PiRpcConnection implements AgentConnection {
           })
           .parse(event.message);
         if (message.role !== "assistant") break;
+        // Aborted and errored streams may end without a block's *_end event.
+        await this.emitDeltas(this.blockDeltas.close());
         // Errored and aborted responses still spent the tokens they report.
         const response = piAssistantUsageSchema.safeParse(event.message);
         if (response.success) {
