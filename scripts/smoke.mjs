@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn, execFile, execFileSync } from "node:child_process";
-import { once } from "node:events";
+import { EventEmitter, once } from "node:events";
 import { createServer } from "node:http";
 import {
   mkdir,
@@ -379,6 +379,7 @@ async function start(
 ) {
   const runEvents = [];
   const usages = [];
+  const usageEvents = new EventEmitter();
   const appliedSteers = [];
   const child = spawn(
     process.execPath,
@@ -412,8 +413,10 @@ async function start(
       requestPermission: async () => ({ outcome: { outcome: "cancelled" } }),
       extNotification: async (method, params) => {
         if (isLodySubagentEvent(params)) runEvents.push(params);
-        if (method === LODY_EXTENSION_METHODS.sessionUsageUpdate)
+        if (method === LODY_EXTENSION_METHODS.sessionUsageUpdate) {
           usages.push(params);
+          usageEvents.emit("usage");
+        }
         if (method === LODY_EXTENSION_METHODS.sessionSteerApplied)
           appliedSteers.push(params);
       },
@@ -448,6 +451,7 @@ async function start(
     configOptions: result.configOptions,
     runEvents,
     usages,
+    usageEvents,
     appliedSteers,
     prompt: (text) =>
       client.prompt({ sessionId: id, prompt: [{ type: "text", text }] }),
@@ -511,6 +515,12 @@ async function exercise(mode) {
       .some((update) => update.title === "read" && update.status === "failed"),
   );
   await a.prompt("RECOVER_TEST");
+  // Extension notifications are dispatched independently of the prompt response.
+  while (
+    (a.usages.at(-1)?.modelUsage["localtest/fixture"]?.inputTokens ?? 0) <
+    bodies.length * 10
+  )
+    await once(a.usageEvents, "usage");
   const nativeUsage = a.usages.at(-1).modelUsage["localtest/fixture"];
   assert.equal(nativeUsage.inputTokens, bodies.length * 10);
   assert.equal(nativeUsage.outputTokens, bodies.length * 5);
