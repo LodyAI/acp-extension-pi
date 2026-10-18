@@ -40,7 +40,8 @@ MCP discovery remains disabled; ACP supplies MCP servers through the existing br
 a read-only scan of globally installed extensions and prints candidates as
 JSON; it never executes extension code. The same explicitly selected paths
 are passed to native subagent children; the packaged adapter extension is
-not forwarded. Remote or package-spec sources (npm:, git:, URLs) and relative
+not forwarded. A separate context-only extension supplies their workspace and
+subagent instructions without replacing native user prompts. Remote or package-spec sources (npm:, git:, URLs) and relative
 paths are refused. Selected extension code runs with Pi's full authority and
 can add tools: this boundary is a supported-feature contract, not a security
 sandbox for shell commands, and arbitrary community plugins are not a
@@ -57,7 +58,7 @@ Core 0.1.9 supplies the contract and helper. A rebuilt, checksummed managed
 runtime is still required before this reaches Lody's installed Pi provider.
 
 - Native prompts, text/images, tool progress/results, model errors and cancellation.
-- Native file identity for explicit new/resume/load. No session-id map.
+- Native file identity for explicit new/resume/load/fork. No session-id map.
 - Session list of native files for a working directory; load replays the
   current branch's user text/images, assistant text/thinking, tool and todo
   history. Compaction summaries and other branches are not replayed. A missing
@@ -69,6 +70,35 @@ runtime is still required before this reaches Lody's installed Pi provider.
 - Questionnaire: one or more questions in Lody's existing question card.
 - Todo: list/add/toggle/clear through Lody's existing checklist.
 - Subagent: native Lody task lifecycle, list, output and individual cancellation.
+
+`session/new`, `session/load`, `session/resume` and `session/fork` accept
+`additionalDirectories`. Both `cwd` and every additional directory must be
+absolute paths. Each activation replaces the request-owned directory list:
+`[A]` → `[B]` → `[]` → omitted means A, then B, then no additional request
+directories, then no additional request directories. Native user configuration
+is preserved. Load/resume reject a cwd that differs from the native session
+header before changing runtime state or configuration (symlink aliases of the
+same directory are accepted). Fork can choose a different target cwd.
+
+The packaged extension supplies these directories to the native model's system
+context. Relative paths and Bash's initial directory still use `cwd`; native
+Read/Write/Bash can access additional roots by absolute path. This is workspace
+context, not a filesystem sandbox or new permission guarantee. Additional roots
+do not trigger extension discovery or load their project configuration. Subagent
+processes inherit the current workspace context, but not the parent's MCP tools.
+Request roots are activation-only, are not saved as native history, and are not
+reported as durable roots by `session/list`; send the full list when reattaching.
+
+Fork uses Pi's native file-fork mechanism for existing persisted history, creates
+a new native ID/file and preserves the source file and active runtime. It copies
+native history rather than sending history as a prompt. Each session has its own
+RPC process and private workspace/MCP configuration; parent, child and sibling
+sessions remain independently addressable on the connection. A fork of a live
+source requires it to be idle. Connection close cleans up all owned runtimes;
+an unexpected Pi exit still fails the entire connection. Empty, never-persisted
+sessions are outside the recovery/fork contract.
+
+Implementation and validation: [additional directories note](.agents/notes/implemented/feature/2026-10-18-additional-directories.md).
 
 MCP audio, resource links and embedded resources are unsupported: a result containing
 any of these fails explicitly, including mixed results. Structured JSON output is

@@ -2,7 +2,7 @@ import { QUESTION_PREFIX } from "../src/builtin-tools.js";
 import type { PiStream } from "../src/types.js";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { join, resolve, normalize } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
 import type * as acp from "@agentclientprotocol/sdk";
 import { PiRpcConnection, initializeResponse } from "../src/connection.js";
@@ -15,7 +15,16 @@ import {
 
 const nativeDirectory = mkdtempSync(join(tmpdir(), "lody-pi-connection-"));
 const nativeSession = join(nativeDirectory, "pi-session.jsonl");
-writeFileSync(nativeSession, "");
+writeFileSync(
+  nativeSession,
+  JSON.stringify({
+    type: "session",
+    version: 3,
+    id: "fixture",
+    timestamp: "2026-01-01T00:00:00.000Z",
+    cwd: "/work",
+  }) + "\n",
+);
 afterAll(() => rmSync(nativeDirectory, { recursive: true, force: true }));
 
 function deferred<T = void>() {
@@ -203,6 +212,9 @@ function peer() {
   const host = {
     subagentEvents: false,
     configureMcp: async (_servers: acp.McpServer[]) => {},
+    configureWorkspace: async (
+      _workspace: import("../src/workspace.js").Workspace,
+    ) => {},
     update: async (notification: acp.SessionNotification) => {
       updates.push(notification);
     },
@@ -1529,10 +1541,68 @@ describe("native Pi connection", () => {
     for (const open of ["resumeSession", "loadSession"] as const)
       await expect(
         p.client[open]({ sessionId: missing, cwd: "/work", mcpServers: [] }),
-      ).rejects.toThrow("session file not found");
+      ).rejects.toThrow("ENOENT");
     expect(p.commands.filter((c) => c.type === "switch_session")).toHaveLength(
       1,
     );
+    p.close();
+  });
+
+  it("replaces workspace roots on each activation and rejects invalid attach before any mutation", async () => {
+    const p = peer();
+    const workspaces: unknown[] = [];
+    p.host.configureWorkspace = async (value) => {
+      workspaces.push(value);
+    };
+    await p.client.newSession({
+      cwd: "/work",
+      mcpServers: [],
+      additionalDirectories: ["/A"],
+    });
+    await p.client.resumeSession({
+      sessionId: nativeSession,
+      cwd: "/work",
+      additionalDirectories: ["/B"],
+    });
+    await p.client.loadSession({
+      sessionId: nativeSession,
+      cwd: "/work",
+      mcpServers: [],
+      additionalDirectories: [],
+    });
+    await p.client.resumeSession({ sessionId: nativeSession, cwd: "/work" });
+    expect(workspaces).toEqual([
+      { cwd: normalize("/work"), additionalDirectories: [normalize("/A")] },
+      { cwd: normalize("/work"), additionalDirectories: [normalize("/B")] },
+      { cwd: normalize("/work"), additionalDirectories: [] },
+      { cwd: normalize("/work"), additionalDirectories: [] },
+    ]);
+    const commands = p.commands.length;
+    for (const open of ["loadSession", "resumeSession"] as const) {
+      await expect(
+        p.client[open]({
+          sessionId: nativeSession,
+          cwd: "/different",
+          mcpServers: [],
+          additionalDirectories: ["/C"],
+        }),
+      ).rejects.toThrow("cwd");
+      await expect(
+        p.client[open]({
+          sessionId: nativeSession,
+          cwd: "/work",
+          mcpServers: [],
+          additionalDirectories: ["relative"],
+        }),
+      ).rejects.toThrow("absolute");
+    }
+    expect(p.commands).toHaveLength(commands);
+    expect(workspaces).toHaveLength(4);
+    // Failed preflight leaves the prior activation addressable and configured.
+    const done = p.client.prompt(prompt);
+    await p.promptReceived.promise;
+    p.finish();
+    await expect(done).resolves.toEqual({ stopReason: "end_turn" });
     p.close();
   });
 

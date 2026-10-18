@@ -9,6 +9,8 @@ import {
   readFile,
   access,
   copyFile,
+  realpath,
+  unlink,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -113,6 +115,10 @@ const server = createServer(async (request, response) => {
   }
   let tool;
   if (last?.role !== "tool" && body.tools?.length) {
+    if (content.startsWith("WORKSPACE_TOOL:"))
+      tool = JSON.parse(content.slice("WORKSPACE_TOOL:".length));
+    if (content.startsWith("WORKSPACE_CHILD:"))
+      tool = ["read", { path: content.slice("WORKSPACE_CHILD:".length) }];
     if (content === "WRITE_EFFECT")
       tool = ["write", { path: "effect.txt", content: "before\n" }];
     if (content === "READ_EFFECT") tool = ["read", { path: "effect.txt" }];
@@ -274,6 +280,12 @@ await writeFile(
             contextWindow: 32000,
             maxTokens: 4096,
           },
+          {
+            id: "fixture-alt",
+            input: ["text", "image"],
+            contextWindow: 32000,
+            maxTokens: 4096,
+          },
         ],
       },
     },
@@ -376,6 +388,7 @@ async function start(
   provider = "localtest",
   open = "resumeSession",
   subagentEvents = false,
+  activation = {},
 ) {
   const runEvents = [];
   const usages = [];
@@ -441,14 +454,15 @@ async function start(
     },
   ];
   const result = sessionId
-    ? await client[open]({ sessionId, cwd: root, mcpServers })
-    : await client.newSession({ cwd: root, mcpServers });
+    ? await client[open]({ sessionId, cwd: root, mcpServers, ...activation })
+    : await client.newSession({ cwd: root, mcpServers, ...activation });
   const id = result.sessionId ?? sessionId;
   return {
     process: child,
     client,
     id,
     configOptions: result.configOptions,
+    capabilities: init.agentCapabilities,
     runEvents,
     usages,
     usageEvents,
@@ -472,6 +486,323 @@ const deadline = setTimeout(
   // windows-11-arm runners take roughly triple the x64 wall time.
   180_000,
 );
+async function exerciseWorkspace() {
+  await writeFile(
+    join(profile, "APPEND_SYSTEM.md"),
+    "WORKSPACE_USER_SYSTEM_PRESERVED",
+  );
+  const models = new Map();
+  const base = await realpath(root);
+  const cwd = join(base, `workspace-main-${codemodeOnly}`);
+  const targetCwd = join(base, `workspace-fork-${codemodeOnly}`);
+  const a = join(base, `extra-a-${codemodeOnly}`);
+  const b = join(base, `extra-b-${codemodeOnly}`);
+  await Promise.all([cwd, targetCwd, a, b].map((path) => mkdir(path)));
+  await writeFile(join(a, "input.txt"), "EXTRA_A_CONTENT");
+  await writeFile(join(b, "input.txt"), "EXTRA_B_CONTENT");
+  await writeFile(join(cwd, "relative.txt"), "MAIN_RELATIVE_CONTENT");
+  await writeFile(join(targetCwd, "relative.txt"), "FORK_RELATIVE_CONTENT");
+  let session = await start(
+    undefined,
+    [],
+    "localtest",
+    "resumeSession",
+    false,
+    { cwd, additionalDirectories: [a] },
+  );
+  assert.ok(session.capabilities.sessionCapabilities.fork);
+  const sourceId = session.id;
+  const prompt = async (id, text, expectedCwd, directories) => {
+    const offset = bodies.length;
+    const result = await session.client.prompt({
+      sessionId: id,
+      prompt: [{ type: "text", text }],
+    });
+    assert.equal(result.stopReason, "end_turn");
+    const requests = bodies.slice(offset);
+    assert.ok(requests.length);
+    for (const body of requests) {
+      const system = body.messages
+        .filter((message) => message.role === "system")
+        .map((message) => message.content)
+        .join("\n");
+      assert.ok(
+        system.includes("WORKSPACE_USER_SYSTEM_PRESERVED"),
+        "native user system configuration survives workspace context",
+      );
+      assert.equal(body.model, models.get(id) ?? "fixture");
+      const marker = system.lastIndexOf("ACP workspace directories");
+      assert.ok(
+        marker >= 0,
+        "native model receives explicit activation workspace context",
+      );
+      const context = system.slice(marker);
+      // JSON escaping matters for Windows paths; inspect the structured context.
+      const jsonStart = context.indexOf("{");
+      const jsonEnd = context.indexOf("}", jsonStart);
+      const actual = JSON.parse(context.slice(jsonStart, jsonEnd + 1));
+      assert.equal(actual.cwd, expectedCwd);
+      assert.deepEqual(actual.additionalDirectories, directories);
+    }
+    return requests;
+  };
+  const tool = (id, name, args, dir, roots) =>
+    prompt(id, `WORKSPACE_TOOL:${JSON.stringify([name, args])}`, dir, roots);
+  const assertToolText = (requests, expected) =>
+    assert.ok(
+      requests.some((body) =>
+        body.messages.some(
+          (message) =>
+            message.role === "tool" &&
+            JSON.stringify(message.content).includes(expected),
+        ),
+      ),
+      `${expected}: ${JSON.stringify(requests.at(-1)?.messages.slice(-2))}`,
+    );
+  assertToolText(
+    await tool(sourceId, "read", { path: join(a, "input.txt") }, cwd, [a]),
+    "EXTRA_A_CONTENT",
+  );
+  assertToolText(
+    await tool(sourceId, "read", { path: "relative.txt" }, cwd, [a]),
+    "MAIN_RELATIVE_CONTENT",
+  );
+  await tool(
+    sourceId,
+    "write",
+    { path: join(a, "written.txt"), content: "EXTRA_NATIVE_WRITE" },
+    cwd,
+    [a],
+  );
+  assert.equal(
+    await readFile(join(a, "written.txt"), "utf8"),
+    "EXTRA_NATIVE_WRITE",
+  );
+  await tool(
+    sourceId,
+    "bash",
+    { command: "echo PRIMARY_NATIVE_BASH > bash-relative.txt" },
+    cwd,
+    [a],
+  );
+  assert.equal(
+    (await readFile(join(cwd, "bash-relative.txt"), "utf8")).trim(),
+    "PRIMARY_NATIVE_BASH",
+  );
+  assertToolText(
+    await tool(
+      sourceId,
+      "subagent",
+      {
+        task: `WORKSPACE_CHILD:${join(a, "input.txt")}`,
+        description: "Workspace inheritance",
+      },
+      cwd,
+      [a],
+    ),
+    "EXTRA_A_CONTENT",
+  );
+  const bashExtra = join(a, "bash-extra.txt");
+  const quote = (value) => "'" + value.replaceAll("'", "'\"'\"'") + "'";
+  await tool(
+    sourceId,
+    "bash",
+    {
+      command: `printf '%s' EXTRA_NATIVE_BASH > ${quote(bashExtra.replaceAll("\\", "/"))}`,
+    },
+    cwd,
+    [a],
+  );
+  assert.equal(await readFile(bashExtra, "utf8"), "EXTRA_NATIVE_BASH");
+  const attachment = (id, roots) => ({
+    sessionId: id,
+    cwd,
+    mcpServers: [],
+    ...(roots === undefined ? {} : { additionalDirectories: roots }),
+  });
+  // Hot reattach must replace, clear, and default the complete roots list.
+  for (const method of ["resumeSession", "loadSession"]) {
+    for (const roots of [[a], [b], [], undefined]) {
+      const before = bodies.length;
+      await session.client[method](attachment(sourceId, roots));
+      assert.equal(
+        bodies.length,
+        before,
+        `${method} must not send historical prompts`,
+      );
+      await prompt(
+        sourceId,
+        `WORKSPACE_${method}_${JSON.stringify(roots)}`,
+        cwd,
+        roots ?? [],
+      );
+    }
+  }
+  await session.client.resumeSession(attachment(sourceId, [a]));
+  const sourceFile = await readFile(sourceId, "utf8");
+  assert.ok(
+    !sourceFile.includes("ACP workspace directories"),
+    "activation context stays outside native history",
+  );
+  const sourceHeader = JSON.parse(sourceFile.split("\n")[0]);
+  const forkIds = [];
+  for (const roots of [[b], [], undefined]) {
+    const before = bodies.length;
+    const child = await session.client.unstable_forkSession({
+      ...attachment(sourceId, roots),
+      cwd: targetCwd,
+      ...(roots?.length
+        ? {
+            mcpServers: [
+              {
+                name: "forkfixture",
+                command: process.execPath,
+                args: [
+                  fileURLToPath(
+                    new URL("../test/fixtures/mcp.mjs", import.meta.url),
+                  ),
+                ],
+                env: [{ name: "MCP_FIXTURE_TAG", value: "fork" }],
+              },
+            ],
+            _meta: {
+              lody: {
+                sessionConfig: {
+                  configOptionValues: { model: "localtest/fixture-alt" },
+                },
+              },
+            },
+          }
+        : {}),
+    });
+    if (roots?.length) models.set(child.sessionId, "fixture-alt");
+    assert.equal(
+      bodies.length,
+      before,
+      "fork cannot replay history as model prompts",
+    );
+    assert.notEqual(child.sessionId, sourceId);
+    assert.ok(!forkIds.includes(child.sessionId));
+    forkIds.push(child.sessionId);
+    const childFile = await readFile(child.sessionId, "utf8");
+    const childHeader = JSON.parse(childFile.split("\n")[0]);
+    assert.notEqual(childHeader.id, sourceHeader.id);
+    assert.equal(childHeader.parentSession, sourceId);
+    assert.equal(childHeader.cwd, targetCwd);
+    assert.deepEqual(
+      childFile
+        .trim()
+        .split("\n")
+        .slice(1, sourceFile.trim().split("\n").length),
+      sourceFile.trim().split("\n").slice(1),
+      "native fork copies history without rewriting entries",
+    );
+    assertToolText(
+      await tool(
+        child.sessionId,
+        "read",
+        { path: "relative.txt" },
+        targetCwd,
+        roots ?? [],
+      ),
+      "FORK_RELATIVE_CONTENT",
+    );
+    if (roots?.length)
+      assertToolText(
+        await tool(
+          child.sessionId,
+          "read",
+          { path: join(b, "input.txt") },
+          targetCwd,
+          roots,
+        ),
+        "EXTRA_B_CONTENT",
+      );
+    if (roots?.length)
+      assertToolText(
+        await tool(
+          child.sessionId,
+          "mcp_forkfixture_echo",
+          { value: "fork-isolated" },
+          targetCwd,
+          roots,
+        ),
+        "MCP:fork:fork-isolated",
+      );
+    assert.equal(
+      await readFile(sourceId, "utf8"),
+      sourceFile,
+      "fork cannot mutate source native history",
+    );
+  }
+  // Prompt all retained activations without resume: source and siblings stay independent.
+  const sourceRequests = await prompt(
+    sourceId,
+    "WORKSPACE_SOURCE_UNCHANGED",
+    cwd,
+    [a],
+  );
+  if (codemodeOnly) {
+    assertToolText(
+      await tool(
+        sourceId,
+        "codemode",
+        {
+          code: "text(ALL_TOOLS.some(tool => tool.name === 'mcp_forkfixture_echo') ? 'MCP_LEAK' : 'MCP_ISOLATED');",
+        },
+        cwd,
+        [a],
+      ),
+      "MCP_ISOLATED",
+    );
+  } else {
+    assert.ok(
+      sourceRequests.every(
+        (body) =>
+          !body.tools.some(
+            (tool) => tool.function.name === "mcp_forkfixture_echo",
+          ),
+      ),
+      "fork MCP tools do not enter source activation",
+    );
+  }
+  await prompt(forkIds[0], "WORKSPACE_FIRST_SIBLING", targetCwd, [b]);
+  await prompt(forkIds[1], "WORKSPACE_SECOND_SIBLING", targetCwd, []);
+  const other = await session.client.newSession({ cwd, mcpServers: [] });
+  await prompt(other.sessionId, "WORKSPACE_OTHER_DEFAULT", cwd, []);
+  await prompt(sourceId, "WORKSPACE_SOURCE_AFTER_NEW", cwd, [a]);
+  await session.close();
+  // Cold load/resume use only requested roots, never roots from native history.
+  for (const method of ["loadSession", "resumeSession"]) {
+    for (const roots of [[b], [], undefined]) {
+      const before = bodies.length;
+      session = await start(sourceId, [], "localtest", method, false, {
+        cwd,
+        mcpServers: [],
+        ...(roots === undefined ? {} : { additionalDirectories: roots }),
+      });
+      assert.equal(bodies.length, before);
+      await prompt(sourceId, "WORKSPACE_COLD_ATTACH", cwd, roots ?? []);
+      await session.close();
+    }
+  }
+  // A cold source can also be forked with an independent cwd and root set.
+  session = await start(undefined, [], "localtest", "resumeSession", false, {
+    cwd,
+    mcpServers: [],
+  });
+  const coldFork = await session.client.unstable_forkSession({
+    ...attachment(sourceId, [b]),
+    cwd: targetCwd,
+  });
+  await prompt(coldFork.sessionId, "WORKSPACE_COLD_FORK", targetCwd, [b]);
+  await session.close();
+  await unlink(join(profile, "APPEND_SYSTEM.md"));
+  console.log(
+    `Workspace lifecycle smoke passed (${codemodeOnly ? "codemode only" : "ordinary tools"}): native roots, file tools, hot/cold attach, fork identity/history/cwd/MCP/model isolation and user system context`,
+  );
+}
+
 async function exercise(mode) {
   codemodeOnly = mode;
   deadline.refresh();
@@ -485,6 +816,9 @@ async function exercise(mode) {
     ? { defaultTools: ["+codemode"], codemode: { mode: "only" } }
     : {};
   await writeFile(join(profile, "settings.json"), JSON.stringify(settings));
+  await exerciseWorkspace();
+  bodies.length = 0;
+  updates.length = 0;
   const a = await start();
   await a.prompt("WRITE_EFFECT");
   assert.equal(await readFile(join(root, "effect.txt"), "utf8"), "before\n");
@@ -1103,6 +1437,7 @@ async function exercise(mode) {
         assert.match(
           error.data?.details ?? "",
           /Failed to load extension[\s\S]*synthetic extension load failure/,
+          JSON.stringify(error),
         );
         return true;
       },
@@ -1170,6 +1505,7 @@ async function exercise(mode) {
         assert.match(
           error.data?.details ?? "",
           /Failed to load extension[\s\S]*Tool "todo" conflicts with/,
+          JSON.stringify(error),
         );
         return true;
       },
@@ -1211,7 +1547,7 @@ async function exercise(mode) {
       "native child must not inherit parent question, recursive subagent or MCP tools",
     );
   console.log(
-    `Native Pi V1 smoke passed (${codemodeOnly ? "codemode only" : "ordinary tools"}): questions, todo/resume, session list/load, subagent lifecycle/output/cancel, Stop/recovery, ambient exclusion, explicit extension opt-in and handled commands`,
+    `Native Pi V1 smoke passed (${codemodeOnly ? "codemode only" : "ordinary tools"}): additionalDirectories new/load/resume/fork, native workspace tools and isolation, questions, todo/resume, session list/load, subagent lifecycle/output/cancel, Stop/recovery, ambient exclusion, explicit extension opt-in and handled commands`,
   );
 }
 try {

@@ -36,6 +36,24 @@ export async function registerMcpTools(pi: ExtensionAPI): Promise<void> {
     await Promise.allSettled(clients.map((client) => client.close()));
   };
   pi.on("session_shutdown", close);
+  pi.on("session_start", () => {
+    // Native resume restores the transcript's declared loadout after registering
+    // extensions. This activation's selected MCP tools may not exist in that
+    // transcript. Add their direct declarations through the native API, keeping
+    // every non-MCP selection and native filtering/codemode projection intact.
+    // Old request tools are absent from the newly loaded extension registry.
+    const selected = pi
+      .getAllTools()
+      .filter(
+        (tool) =>
+          tools.has(tool.name) &&
+          (tool.exposure === undefined ||
+            tool.exposure === "direct" ||
+            tool.exposure === "model-only"),
+      )
+      .map((tool) => tool.name);
+    pi.setActiveTools([...new Set([...pi.getActiveTools(), ...selected])]);
+  });
   // Pi's tool result hook preserves the MCP error flag.
   pi.on("tool_result", (event) => {
     if (

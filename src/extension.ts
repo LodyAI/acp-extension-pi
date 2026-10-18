@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { registerMcpTools } from "./mcp.js";
 import { registerBuiltinTools } from "./builtin-tools.js";
 import { registerSubagents } from "./subagents.js";
+import { readWorkspace, workspaceContext } from "./workspace.js";
 /** Loaded inside Pi. Identity travels as native custom-message metadata, never model text. */
 type Content = Array<
   | { type: "text"; text: string }
@@ -18,6 +19,10 @@ export default async function lodyExtension(pi: ExtensionAPI): Promise<void> {
     ctx.ui.notify("lody-rpc:" + JSON.stringify(event), "info");
   // A private invocation per loaded runtime avoids sharing the public command namespace.
   const command = `lody-steer-${randomUUID()}`;
+  const workspace = readWorkspace();
+  pi.on("before_agent_start", (event) => ({
+    systemPrompt: `${event.systemPrompt}\n\n${workspaceContext(workspace)}`,
+  }));
   registerBuiltinTools(pi, emit);
   const subagent = registerSubagents(pi, emit);
   pi.on("session_before_tree", (_event, ctx) => {

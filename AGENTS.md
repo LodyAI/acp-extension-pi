@@ -9,8 +9,8 @@ workspace packages or reimplement Pi's executor.
   extension, Pi's builtin:codemode and explicit -e/--extension absolute paths are loaded; selections
   are default-off and bounded. `--list-extensions` scans globally installed
   extensions read-only without executing them. Child Pi processes disable
-  discovery too and inherit the same explicit list, never the packaged
-  extension. This is a supported-feature boundary, not a sandbox against
+  discovery too and inherit the same explicit list plus a context-only workspace
+  extension, never the packaged tools extension. This is a supported-feature boundary, not a sandbox against
   arbitrary bash: selected extension code can add tools and no arbitrary
   plugin compatibility is promised.
 - Packaged tools are questionnaire, todo, subagent and ACP-selected stdio MCP
