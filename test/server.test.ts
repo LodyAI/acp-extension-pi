@@ -1,5 +1,6 @@
 import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
+import { resolve } from "node:path";
 import { existsSync, readFileSync } from "node:fs";
 import type { Agent, Stream } from "@agentclientprotocol/sdk";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -199,9 +200,10 @@ describe("native session runtime ownership", () => {
       additionalDirectories: ["/a"],
     });
     mocks.runtimes[0].busy = true;
+    const targetCwd = resolve("fork-target");
     const request = {
       sessionId: source.sessionId,
-      cwd: "/target",
+      cwd: targetCwd,
       mcpServers: [],
       additionalDirectories: ["/b"],
     };
@@ -213,14 +215,14 @@ describe("native session runtime ownership", () => {
     mocks.runtimes[0].busy = false;
     const fork = await agent.unstable_forkSession!(request);
     expect(fork.sessionId).toBe("/fork.jsonl");
-    expect(mocks.fork).toHaveBeenCalledWith(source.sessionId, "/target");
+    expect(mocks.fork).toHaveBeenCalledWith(source.sessionId, targetCwd);
     expect(mocks.runtimes[0].resumeSession).not.toHaveBeenCalled();
     expect(workspace(0)).toEqual({
       cwd: "/main",
       additionalDirectories: ["/a"],
     });
     expect(workspace(1)).toEqual({
-      cwd: "/target",
+      cwd: targetCwd,
       additionalDirectories: ["/b"],
     });
     await agent.prompt({ sessionId: source.sessionId, prompt: [] });
