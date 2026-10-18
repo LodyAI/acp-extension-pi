@@ -1,6 +1,7 @@
 import spawn from "cross-spawn";
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import type {
   ExtensionAPI,
   ExtensionContext,
@@ -77,8 +78,8 @@ export function registerSubagents(
         model,
         "--thinking",
         pi.getThinkingLevel(),
-        "--append-system-prompt",
-        "You are a subagent. Complete the delegated task. If information is missing, report it to the parent; do not ask the user. Do not start other agents.",
+        "-e",
+        fileURLToPath(new URL("./child-context.js", import.meta.url)),
         "--",
         args.task,
       ]);

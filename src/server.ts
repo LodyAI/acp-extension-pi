@@ -21,7 +21,12 @@ import { PiRpcConnection, initializeResponse } from "./connection.js";
 import { PI_EXTENSIONS_ENV, parsePiLaunchArgs } from "./extensions.js";
 import { resolvePiLaunch } from "./launch.js";
 import { MCP_CONFIG_ENV } from "./mcp.js";
-import { listPiSessions } from "./sessions.js";
+import {
+  forkPiSession,
+  listPiSessions,
+  validateSessionCwd,
+} from "./sessions.js";
+import { validateWorkspace, WORKSPACE_CONFIG_ENV } from "./workspace.js";
 
 const SHUTDOWN_GRACE_MS = 1_000;
 
@@ -41,79 +46,151 @@ function waitForExit(child: ChildProcess): Promise<void> {
   });
 }
 
-/** One runtime per ACP connection; Pi owns its native files and tool processes. */
+/** Drain accepted ACP requests through their actual response writes before exit. */
+function drainingStream(stream: Stream) {
+  const pending = new Set<unknown>();
+  let disconnected = false;
+  let drained: (() => void) | undefined;
+  const settle = () => {
+    if (disconnected || pending.size === 0) drained?.();
+  };
+  const disconnect = () => {
+    disconnected = true;
+    settle();
+  };
+  const tracked: Stream = {
+    readable: stream.readable.pipeThrough(
+      new TransformStream({
+        transform(message, controller) {
+          if ("method" in message && "id" in message) pending.add(message.id);
+          controller.enqueue(message);
+        },
+      }),
+    ),
+    writable: new WritableStream({
+      async write(message) {
+        const writer = stream.writable.getWriter();
+        try {
+          await writer.write(message);
+          if (!("method" in message) && "id" in message) {
+            pending.delete(message.id);
+            settle();
+          }
+        } catch (error) {
+          disconnect();
+          throw error;
+        } finally {
+          writer.releaseLock();
+        }
+      },
+      abort: disconnect,
+    }),
+  };
+  return {
+    stream: tracked,
+    disconnect,
+    drain: () =>
+      disconnected || pending.size === 0
+        ? Promise.resolve()
+        : new Promise<void>((resolve) => {
+            drained = resolve;
+          }),
+  };
+}
+
+/** Each native session owns a runtime; the native file path is its routing key. */
 export function serve(stream: Stream, piArgs: string[] = []) {
-  // Never forward ambient extension/resource control flags to the native process.
   const parsed = parsePiLaunchArgs(piArgs);
-  let child: ChildProcess | undefined;
-  let runtime: Promise<PiRpcConnection> | undefined;
+  const output = drainingStream(stream);
+  type OwnedRuntime = {
+    child: ChildProcess;
+    pi: PiRpcConnection;
+    configDirectory: string;
+    stopping?: Promise<void>;
+  };
+  const ownedRuntimes = new Set<OwnedRuntime>();
+  const sessions = new Map<string, PiRpcConnection>();
   let subagentEvents = false;
-  let current: PiRpcConnection | undefined;
-  let cwd: string | undefined;
   let closing: Promise<void> | undefined;
+  let lifecycleBusy = false;
   let piExitedUnexpectedly = false;
-  let configDirectory: string | undefined;
   let resolveClosed!: () => void;
   const closed = new Promise<void>((resolve) => {
     resolveClosed = resolve;
   });
-  const close = (): Promise<void> => {
-    if (closing) return closing;
-    closing = (async () => {
-      current?.close();
+  const stop = (owned: OwnedRuntime): Promise<void> => {
+    if (owned.stopping) return owned.stopping;
+    owned.stopping = Promise.resolve().then(async () => {
+      owned.pi.close();
       try {
-        const owned = child;
-        if (!owned?.pid) return;
-        if (process.platform === "win32") owned.stdin?.end();
+        const child = owned.child;
+        if (!child.pid) return;
+        if (process.platform === "win32") child.stdin?.end();
         else {
-          // Pi's SIGTERM handler stops tracked detached tools before awaiting shutdown hooks.
+          // Pi stops tracked detached tools before awaiting shutdown hooks.
           try {
-            process.kill(-owned.pid, "SIGTERM");
+            process.kill(-child.pid, "SIGTERM");
           } catch {
             /* Already exited. */
           }
         }
-        await waitForExit(owned);
+        await waitForExit(child);
         if (process.platform !== "win32") {
           try {
-            process.kill(-owned.pid, "SIGKILL");
+            process.kill(-child.pid, "SIGKILL");
           } catch {
             /* Already exited. */
           }
-          await waitForExit(owned);
+          await waitForExit(child);
         }
       } finally {
-        try {
-          if (configDirectory)
-            rmSync(configDirectory, { recursive: true, force: true });
-        } finally {
-          // The executable exits, releasing its Windows Job and all descendants.
-          resolveClosed();
-        }
+        rmSync(owned.configDirectory, { recursive: true, force: true });
+        ownedRuntimes.delete(owned);
       }
-    })();
+    });
+    return owned.stopping;
+  };
+  const close = (): Promise<void> => {
+    if (closing) return closing;
+    closing = Promise.resolve().then(async () => {
+      try {
+        await Promise.all([...ownedRuntimes].map(stop));
+        await output.drain();
+      } finally {
+        resolveClosed();
+      }
+    });
     return closing;
   };
+  const lifecycle = async <T>(action: () => Promise<T>): Promise<T> => {
+    if (closing) throw new Error("ACP connection closed");
+    if (lifecycleBusy)
+      throw new Error("Pi session lifecycle operation already in progress");
+    lifecycleBusy = true;
+    try {
+      return await action();
+    } finally {
+      lifecycleBusy = false;
+    }
+  };
   const connection = new AgentSideConnection((client): Agent => {
-    const get = async (directory?: string) => {
+    const get = (sessionId: string) => {
       if (closing) throw new Error("ACP connection closed");
-      if (runtime) {
-        if (directory && directory !== cwd)
-          throw RequestError.invalidRequest(
-            undefined,
-            "Use another ACP connection for a different working directory",
-          );
-        return runtime;
-      }
-      if (!directory)
+      const pi = sessions.get(sessionId);
+      if (!pi)
         throw RequestError.invalidRequest(
           undefined,
-          "Create or resume a session first",
+          "Create or resume this session first",
         );
-      cwd = directory;
-      configDirectory = mkdtempSync(join(tmpdir(), "lody-pi-mcp-"));
+      return pi;
+    };
+    const start = async (workspace: ReturnType<typeof validateWorkspace>) => {
+      if (closing) throw new Error("ACP connection closed");
+      const configDirectory = mkdtempSync(join(tmpdir(), "lody-pi-config-"));
       const configPath = join(configDirectory, "servers.json");
+      const workspacePath = join(configDirectory, "workspace.json");
       writeFileSync(configPath, "[]", { mode: 0o600 });
+      writeFileSync(workspacePath, JSON.stringify(workspace), { mode: 0o600 });
       const { command, args: launchArgs } = resolvePiLaunch([
         ...parsed.args,
         "--mode",
@@ -124,18 +201,20 @@ export function serve(stream: Stream, piArgs: string[] = []) {
         "-e",
         fileURLToPath(new URL("./extension.js", import.meta.url)),
       ]);
-      child = spawn(command, launchArgs, {
-        cwd,
+      const child = spawn(command, launchArgs, {
+        cwd: workspace.cwd,
         windowsHide: true,
         env: {
           ...process.env,
           [MCP_CONFIG_ENV]: configPath,
+          [WORKSPACE_CONFIG_ENV]: workspacePath,
           [PI_EXTENSIONS_ENV]: JSON.stringify(parsed.extensions),
         },
         stdio: ["pipe", "pipe", "pipe"],
         detached: process.platform !== "win32",
       });
       child.once("exit", () => {
+        if (owned.stopping) return;
         if (!closing) {
           piExitedUnexpectedly = true;
           process.exitCode = 1;
@@ -160,6 +239,12 @@ export function serve(stream: Stream, piArgs: string[] = []) {
         },
         {
           subagentEvents,
+          configureWorkspace: async (nextWorkspace) => {
+            if (closing) throw new Error("ACP connection closed");
+            writeFileSync(workspacePath, JSON.stringify(nextWorkspace), {
+              mode: 0o600,
+            });
+          },
           configureMcp: async (servers) => {
             // Configuration exclusion keeps this write before the next runtime loads it.
             if (closing) throw new Error("ACP connection closed");
@@ -182,15 +267,43 @@ export function serve(stream: Stream, piArgs: string[] = []) {
         },
         (error) => diagnostics.decorateError(error),
       );
-      current = pi;
-      runtime = Promise.race([
-        pi.initialize({ protocolVersion: 1 }).then(() => {
-          diagnostics.stop();
-          return pi;
-        }),
-        new Promise<never>((_resolve, reject) => child!.once("error", reject)),
-      ]);
-      return runtime;
+      const owned: OwnedRuntime = { child, pi, configDirectory };
+      ownedRuntimes.add(owned);
+      try {
+        await Promise.race([
+          pi.initialize({ protocolVersion: 1 }),
+          new Promise<never>((_resolve, reject) => child.once("error", reject)),
+        ]);
+        diagnostics.stop();
+        if (closing) throw new Error("ACP connection closed");
+        return owned;
+      } catch (error) {
+        // Failure to initialize the native transport/required extension is fatal,
+        // even if our cleanup stops Pi before its unexpected exit is observed.
+        if (!closing) {
+          piExitedUnexpectedly = true;
+          process.exitCode = 1;
+        }
+        // Let the request reject before shutdown resolves `closed` (the
+        // executable exits then), so ACP can deliver the startup diagnostics.
+        void close();
+        throw diagnostics.decorateError(error);
+      }
+    };
+    const activate = async <T>(
+      workspace: ReturnType<typeof validateWorkspace>,
+      action: (pi: PiRpcConnection) => Promise<T>,
+      identity: (result: T) => string,
+    ): Promise<T> => {
+      const owned = await start(workspace);
+      try {
+        const result = await action(owned.pi);
+        sessions.set(identity(result), owned.pi);
+        return result;
+      } catch (error) {
+        await stop(owned);
+        throw error;
+      }
     };
     const validate = (request: { mcpServers?: unknown[] }) => {
       if (
@@ -215,31 +328,90 @@ export function serve(stream: Stream, piArgs: string[] = []) {
           "Authenticate through Pi on the execution machine",
         );
       },
-      newSession: async (request) => {
-        validate(request);
-        return (await get(request.cwd)).newSession(request);
-      },
-      resumeSession: async (request) => {
-        validate(request);
-        return (await get(request.cwd)).resumeSession(request);
-      },
-      loadSession: async (request) => {
-        validate(request);
-        return (await get(request.cwd)).loadSession(request);
-      },
+      newSession: (request) =>
+        lifecycle(async () => {
+          validate(request);
+          const workspace = validateWorkspace(request);
+          return activate(
+            workspace,
+            (pi) => pi.newSession(request),
+            (result) => result.sessionId,
+          );
+        }),
+      resumeSession: (request) =>
+        lifecycle(async () => {
+          validate(request);
+          const workspace = validateWorkspace(request);
+          await validateSessionCwd(request.sessionId, workspace.cwd);
+          const existing = sessions.get(request.sessionId);
+          if (existing) return existing.resumeSession(request);
+          return activate(
+            workspace,
+            (pi) => pi.resumeSession(request),
+            () => request.sessionId,
+          );
+        }),
+      loadSession: (request) =>
+        lifecycle(async () => {
+          validate(request);
+          const workspace = validateWorkspace(request);
+          await validateSessionCwd(request.sessionId, workspace.cwd);
+          const existing = sessions.get(request.sessionId);
+          if (existing) return existing.loadSession(request);
+          return activate(
+            workspace,
+            (pi) => pi.loadSession(request),
+            () => request.sessionId,
+          );
+        }),
+      unstable_forkSession: (request) =>
+        lifecycle(async () => {
+          validate(request);
+          const workspace = validateWorkspace(request);
+          const fork = async () => {
+            const sessionId = await forkPiSession(
+              request.sessionId,
+              workspace.cwd,
+            );
+            return activate(
+              workspace,
+              async (pi) => ({
+                ...(await pi.resumeSession({ ...request, sessionId })),
+                sessionId,
+              }),
+              () => sessionId,
+            );
+          };
+          const source = sessions.get(request.sessionId);
+          return source ? source.withIdle(fork) : fork();
+        }),
       listSessions: listPiSessions,
-      prompt: async (request) => (await get()).prompt(request),
-      cancel: async (request) => {
-        await (await get()).cancel(request);
-      },
+      prompt: async (request) => get(request.sessionId).prompt(request),
+      cancel: async (request) => get(request.sessionId).cancel(request),
       setSessionConfigOption: async (request) =>
-        (await get()).setSessionConfigOption(request),
-      extMethod: async (method, params) =>
-        (await get()).request(normalizeLodyExtensionMethod(method), params),
+        get(request.sessionId).setSessionConfigOption(request),
+      extMethod: async (method, params) => {
+        if (!params || typeof params.sessionId !== "string")
+          throw RequestError.invalidRequest(
+            undefined,
+            "A sessionId is required",
+          );
+        return get(params.sessionId).request(
+          normalizeLodyExtensionMethod(method),
+          params,
+        );
+      },
     };
-  }, stream);
-  connection.signal.addEventListener("abort", () => void close(), {
-    once: true,
-  });
+  }, output.stream);
+  connection.signal.addEventListener(
+    "abort",
+    () => {
+      output.disconnect();
+      void close();
+    },
+    {
+      once: true,
+    },
+  );
   return { connection, close, closed };
 }

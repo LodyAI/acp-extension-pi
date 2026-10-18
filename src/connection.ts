@@ -1,4 +1,3 @@
-import { existsSync } from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import * as acp from "@agentclientprotocol/sdk";
@@ -21,6 +20,8 @@ import {
   piUsageSchema,
   toModelUsage,
 } from "./usage.js";
+import { validateWorkspace, type Workspace } from "./workspace.js";
+import { validateSessionCwd } from "./sessions.js";
 import { PI_RPC_VERSION } from "./version.js";
 import { QUESTION_PREFIX, questionsSchema } from "./builtin-tools.js";
 import { BlockDeltaSequencer, type BlockDelta } from "./block-deltas.js";
@@ -221,6 +222,7 @@ type Run = Progress &
 type Host = {
   subagentEvents?: boolean;
   configureMcp: (servers: acp.McpServer[]) => Promise<void>;
+  configureWorkspace: (workspace: Workspace) => Promise<void>;
   update: (notification: acp.SessionNotification) => Promise<void>;
   extension: (method: string, params: Record<string, unknown>) => Promise<void>;
   usage: (usage: SessionUsageUpdate) => void;
@@ -307,8 +309,10 @@ export class PiRpcConnection implements AgentConnection {
   }
 
   newSession: AgentConnection["newSession"] = async (request) => {
+    const workspace = validateWorkspace(request);
     return this.configure(async () => {
-      this.cwd = request.cwd;
+      this.cwd = workspace.cwd;
+      await this.host.configureWorkspace(workspace);
       await this.host.configureMcp(request.mcpServers ?? []);
       this.steerCommand = "";
       const result = z
@@ -329,23 +333,16 @@ export class PiRpcConnection implements AgentConnection {
     return { configOptions };
   };
 
-  private open(
+  private async open(
     request: acp.ResumeSessionRequest,
     replay: boolean,
   ): Promise<acp.NewSessionResponse> {
+    const workspace = validateWorkspace(request);
+    // Invalid attach requests must not retire the current identity, roots or MCP clients.
+    await validateSessionCwd(request.sessionId, workspace.cwd);
     return this.configure(async () => {
-      this.cwd = request.cwd;
-      if (
-        !path.isAbsolute(request.sessionId) ||
-        !request.sessionId.endsWith(".jsonl")
-      ) {
-        throw new Error(
-          "Pi resume requires its native session file; pi-acp ids cannot be migrated automatically",
-        );
-      }
-      // Pi opens a missing path as a new empty session under that name.
-      if (!existsSync(request.sessionId))
-        throw new Error(`Pi session file not found: ${request.sessionId}`);
+      this.cwd = workspace.cwd;
+      await this.host.configureWorkspace(workspace);
       await this.host.configureMcp(request.mcpServers ?? []);
       this.steerCommand = "";
       const result = z.object({ cancelled: z.boolean() }).parse(
@@ -1552,6 +1549,11 @@ export class PiRpcConnection implements AgentConnection {
     await Promise.all([...this.questions.values()].map((cancel) => cancel()));
   }
 
+  /** Freeze an active source while native fork copies its durable history. */
+  withIdle<T>(action: () => Promise<T>): Promise<T> {
+    return this.configure(action);
+  }
+
   private async configure<T>(
     action: () => Promise<T>,
     replaceSession = false,
@@ -1721,7 +1723,12 @@ export function initializeResponse(): acp.InitializeResponse {
       },
       promptCapabilities: { image: true, embeddedContext: true },
       loadSession: true,
-      sessionCapabilities: { resume: {}, list: {} },
+      sessionCapabilities: {
+        resume: {},
+        list: {},
+        fork: {},
+        additionalDirectories: {},
+      },
     },
     authMethods: [],
   };
