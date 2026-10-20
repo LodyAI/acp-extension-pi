@@ -144,6 +144,22 @@ cancels outstanding questions, clears queues, aborts Pi, and waits for request
 cleanup. A transport failure fails the request. Connection close terminates the
 owned process group, including non-detached child agents.
 
+Pi's canonical `turn_end` and `agent_end` wire records repeat messages and image
+results already delivered individually. The adapter drains these unused aggregate
+bodies to LF without retaining or parsing them. `agent_settled` remains the completion
+barrier; required RPC records retain the 16 Mi-character limit, UTF-8 validation,
+and EOF failure behavior. The aggregate filter relies on the pinned Pi 1.3
+serialization prefix and does not filter nested or later `type` properties.
+
+History load obtains Pi's current branch through the packaged extension's private
+control channel in chunks of at most 1 Mi characters, including entries larger
+than one chunk. Replay checks the leaf identity, page progress, parent continuity,
+and complete entries before publishing history. Image bytes and native tool ids
+are preserved. Individual entries remain bounded at 16 Mi characters; total
+history may exceed a single RPC record. This bounds wire records, not the full
+branch retained for replay. No native session file is reopened or migrated by
+this reader.
+
 On Unix, V1 relies on Pi's cooperative cleanup of its detached shell commands.
 If Pi is forcibly killed or crashes before that cleanup runs, commands in separate
 process groups can survive the adapter and continue writing files or running

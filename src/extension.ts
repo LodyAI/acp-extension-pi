@@ -4,6 +4,7 @@ import { registerMcpTools } from "./mcp.js";
 import { registerBuiltinTools } from "./builtin-tools.js";
 import { registerSubagents } from "./subagents.js";
 import { readWorkspace, workspaceContext } from "./workspace.js";
+import { historyPage } from "./history.js";
 /** Loaded inside Pi. Identity travels as native custom-message metadata, never model text. */
 type Content = Array<
   | { type: "text"; text: string }
@@ -54,7 +55,12 @@ export default async function lodyExtension(pi: ExtensionAPI): Promise<void> {
       };
       if (control.op && control.id) {
         try {
-          const data = await subagent({ ...control, op: control.op });
+          if (control.op === "history" && !ctx.isIdle())
+            throw new Error("Pi history replay requires an idle session");
+          const data =
+            control.op === "history"
+              ? historyPage(ctx.sessionManager, control)
+              : await subagent({ ...control, op: control.op });
           emit(ctx, { type: "lody_control", id: control.id, data });
         } catch (error) {
           emit(ctx, {
