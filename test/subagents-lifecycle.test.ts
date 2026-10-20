@@ -137,16 +137,58 @@ describe("subagent execution deadlines", () => {
     expect(child.signals).toEqual(["SIGTERM", "SIGKILL"]);
     expect(settled).toBe(false);
     child.exit(null, "SIGKILL");
+    // Node can deliver buffered data after exit, including after forced termination.
+    expect(child.stdout.destroyed).toBe(false);
+    expect(child.stderr.destroyed).toBe(false);
+    child.stdout.write(
+      JSON.stringify({
+        type: "message_update",
+        assistantMessageEvent: {
+          type: "text_delta",
+          delta: "Final buffered reply",
+        },
+      }) + "\n",
+    );
+    child.stdout.write(
+      JSON.stringify({
+        type: "message_end",
+        message: {
+          role: "assistant",
+          stopReason: "stop",
+          provider: "test",
+          model: "model",
+          responseId: "last-response",
+          timestamp: 123,
+          usage: { input: 1, output: 2 },
+        },
+      }) + "\n",
+    );
+    child.stderr.write("Final stderr");
+    await vi.advanceTimersByTimeAsync(999);
+    expect(settled).toBe(false);
+    expect(child.stdout.destroyed).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
 
     await expect(result).resolves.toMatchObject({
       content: [
         {
           type: "text",
-          text: expect.stringContaining("timed out after 2 seconds"),
+          text: expect.stringMatching(
+            /timed out after 2 seconds[\s\S]*Final buffered reply[\s\S]*Final stderr/,
+          ),
         },
       ],
       details: { status: "failed", isError: true },
     });
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        type: "lody_usage",
+        message: expect.objectContaining({
+          responseId: "last-response",
+          usage: { input: 1, output: 2 },
+        }),
+      }),
+    );
     expect(events.at(-1)).toMatchObject({
       type: "lody_subagent",
       state: "failed",
@@ -164,7 +206,7 @@ describe("subagent execution deadlines", () => {
     expect(child.stderr.destroyed).toBe(false);
 
     await vi.advanceTimersByTimeAsync(2000);
-    // Preserve output already buffered by the exited child during the stop grace.
+    // Preserve output already buffered by the exited child during the drain grace.
     expect(child.stdout.destroyed).toBe(false);
     child.stdout.write(
       JSON.stringify({
@@ -181,6 +223,24 @@ describe("subagent execution deadlines", () => {
     });
     expect(child.signals).toEqual([]);
     expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("finishes as soon as pipes close during the drain grace and clears its timer", async () => {
+    const { run, events } = harness();
+    const result = run({ timeoutSeconds: 2 });
+    const child = children[0]!;
+    await vi.advanceTimersByTimeAsync(3000);
+    child.exit(null, "SIGKILL");
+    expect(child.stdout.destroyed).toBe(false);
+    child.close(null, "SIGKILL");
+    await expect(result).resolves.toMatchObject({
+      details: { status: "failed" },
+    });
+    expect(vi.getTimerCount()).toBe(0);
+    const eventCount = events.length;
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(events).toHaveLength(eventCount);
+    expect(child.signals).toEqual(["SIGTERM", "SIGKILL"]);
   });
 
   it("applies the 30-minute default even when no timeout is supplied", async () => {
@@ -220,6 +280,7 @@ describe("subagent execution deadlines", () => {
     await vi.advanceTimersByTimeAsync(2000);
     expect(child.signals).toEqual(["SIGTERM", "SIGKILL"]);
     child.exit(null, "SIGKILL");
+    await vi.advanceTimersByTimeAsync(1000);
     await expect(result).resolves.toMatchObject({
       content: [{ text: "Cancelled" }],
       details: { status: "killed", isError: true },

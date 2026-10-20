@@ -137,8 +137,10 @@ choose a longer limit explicitly for long-running work. On expiry, the existing
 cancellation path stops the child, escalates after one second if needed, and waits
 for child exit before returning a failed tool result with the timeout reason and
 bounded partial output. A user cancellation remains `Cancelled`, not a timeout.
-Once cancelled and exited, the adapter closes its output readers so inherited pipes
-cannot keep the parent tool waiting. This does not terminate detached descendants;
+After a cancelled child exits, the adapter allows up to one additional second for
+buffered output and usage records to drain, finishing sooner if the pipes close.
+It then closes its output readers so inherited pipes cannot keep the parent tool
+waiting. This does not terminate detached descendants;
 the Unix containment limitation below still applies. No prompt is retried automatically.
 
 ## Lifecycle

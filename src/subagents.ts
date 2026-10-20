@@ -110,7 +110,7 @@ export function registerSubagents(
       let cancellation: Promise<void> | undefined;
       let forced: ReturnType<typeof setTimeout> | undefined;
       let deadline: ReturnType<typeof setTimeout> | undefined;
-      let stopGraceElapsed = false;
+      let draining: ReturnType<typeof setTimeout> | undefined;
       let timedOut = false;
       let failed = false;
       let buffer = "";
@@ -174,19 +174,21 @@ export function registerSubagents(
           }
         }
       };
-      const closeCancelledPipes = () => {
+      const drainCancelledPipes = () => {
         if (
-          cancellation &&
-          stopGraceElapsed &&
-          (proc.exitCode !== null || proc.signalCode !== null)
-        ) {
-          // A descendant can keep inherited stdio open after Pi exits. Allow
-          // final buffered output to drain during the stop grace, then close
-          // these readers so inherited pipes cannot keep the tool waiting.
-          // This does not claim to terminate detached descendant processes.
+          !cancellation ||
+          draining ||
+          (proc.exitCode === null && proc.signalCode === null)
+        )
+          return;
+        if (forced) clearTimeout(forced);
+        // exit does not mean stdout/stderr have drained, even after SIGKILL.
+        // Start a separate grace after exit, then close inherited readers so
+        // descendants cannot keep the tool waiting. This does not kill them.
+        draining = setTimeout(() => {
           proc.stdout!.destroy();
           proc.stderr!.destroy();
-        }
+        }, 1000);
       };
       const task: Task = {
         info,
@@ -200,11 +202,8 @@ export function registerSubagents(
           cancellation = task.finished;
           if (deadline) clearTimeout(deadline);
           kill(false);
-          forced = setTimeout(() => {
-            stopGraceElapsed = true;
-            kill(true);
-            closeCancelledPipes();
-          }, 1000);
+          forced = setTimeout(() => kill(true), 1000);
+          drainCancelledPipes();
           return cancellation;
         },
       };
@@ -299,11 +298,12 @@ export function registerSubagents(
       };
       signal?.addEventListener("abort", abort, { once: true });
       if (signal?.aborted) abort();
-      proc.once("exit", closeCancelledPipes);
+      proc.once("exit", drainCancelledPipes);
       proc.once("close", (code) => {
         if (deadline) clearTimeout(deadline);
         if (forced) clearTimeout(forced);
-        proc.removeListener("exit", closeCancelledPipes);
+        if (draining) clearTimeout(draining);
+        proc.removeListener("exit", drainCancelledPipes);
         signal?.removeEventListener("abort", abort);
         info.status = timedOut
           ? "failed"
