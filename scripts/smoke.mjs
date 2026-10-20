@@ -79,6 +79,8 @@ let codemodeOnly = false;
 let childRequest;
 let releaseChild;
 let heldChild;
+let timeoutChildRequest;
+let timeoutChildResponse;
 let mainRequest;
 let releaseMain;
 const server = createServer(async (request, response) => {
@@ -186,6 +188,15 @@ const server = createServer(async (request, response) => {
           code: "text(ALL_TOOLS.some(tool => tool.name === 'subagent' || tool.name === 'questionnaire' || tool.name.startsWith('mcp_')) ? 'CHILD_NOT_ISOLATED' : 'CHILD_ISOLATED');",
         },
       ];
+    if (content === "TIMEOUT_SUB")
+      tool = [
+        "subagent",
+        {
+          task: "CHILD_TIMEOUT",
+          description: "Timed out child",
+          timeoutSeconds: 10,
+        },
+      ];
     if (content.includes("CANCEL_SUB"))
       tool = [
         "subagent",
@@ -196,6 +207,11 @@ const server = createServer(async (request, response) => {
         "subagent",
         { task: "CHILD_LENGTH", description: "Truncated child" },
       ];
+  }
+  if (content === "CHILD_TIMEOUT") {
+    timeoutChildResponse = response;
+    timeoutChildRequest();
+    return;
   }
   if (content === "CHILD_HOLD") {
     releaseChild = response;
@@ -1022,6 +1038,53 @@ async function exercise(mode) {
   );
   assert.equal(lengthTool.rawOutput.details.isError, true);
   assert.match(lengthTool.rawOutput.content[0].text, /^length\n/);
+  const beforeTimeout = updates.length;
+  const timeoutChildSeen = new Promise((resolve) => {
+    timeoutChildRequest = resolve;
+  });
+  const timingOut = a.prompt("TIMEOUT_SUB");
+  await Promise.race([
+    timeoutChildSeen,
+    timingOut.then(() => {
+      throw new Error(
+        "Subagent deadline elapsed before the fixture request started",
+      );
+    }),
+  ]);
+  // Hold an actual model request open until the adapter's deadline stops Pi.
+  const timeoutChildDisconnected = once(timeoutChildResponse, "close");
+  assert.equal((await timingOut).stopReason, "end_turn");
+  await timeoutChildDisconnected;
+  const timeoutUpdates = updates.slice(beforeTimeout);
+  const timedOut = timeoutUpdates
+    .filter(
+      (update) => update._meta?.lody?.task?.description === "Timed out child",
+    )
+    .at(-1)._meta.lody.task;
+  assert.equal(timedOut.status, "failed");
+  assert.equal(timedOut.error, "Subagent timed out after 10 seconds");
+  const timeoutTool = timeoutUpdates.find(
+    (update) => update.title === "subagent" && update.status === "failed",
+  );
+  assert.equal(timeoutTool.rawOutput.details.isError, true);
+  assert.match(
+    timeoutTool.rawOutput.content[0].text,
+    /^Subagent timed out after 10 seconds/,
+  );
+  assert.equal(
+    (
+      await a.client.extMethod(LODY_EXTENSION_METHODS.subagentsList, {
+        sessionId: a.id,
+        activeOnly: true,
+      })
+    ).tasks.length,
+    0,
+  );
+  assert.equal(
+    (await a.prompt("RECOVER_AFTER_TIMEOUT")).stopReason,
+    "end_turn",
+  );
+
   const running = a.prompt("CANCEL_SUB");
   await heldChild;
   assert.ok(
@@ -1523,7 +1586,7 @@ async function exercise(mode) {
     body.messages.some(
       (message) =>
         message.role === "user" &&
-        ["CHILD_TEST", "CHILD_HOLD"].includes(message.content),
+        ["CHILD_TEST", "CHILD_HOLD", "CHILD_TIMEOUT"].includes(message.content),
     ),
   )) {
     const names = body.tools?.map((tool) => tool.function.name) ?? [];
@@ -1547,7 +1610,7 @@ async function exercise(mode) {
       "native child must not inherit parent question, recursive subagent or MCP tools",
     );
   console.log(
-    `Native Pi V1 smoke passed (${codemodeOnly ? "codemode only" : "ordinary tools"}): additionalDirectories new/load/resume/fork, native workspace tools and isolation, questions, todo/resume, session list/load, subagent lifecycle/output/cancel, Stop/recovery, ambient exclusion, explicit extension opt-in and handled commands`,
+    `Native Pi V1 smoke passed (${codemodeOnly ? "codemode only" : "ordinary tools"}): additionalDirectories new/load/resume/fork, native workspace tools and isolation, questions, todo/resume, session list/load, subagent lifecycle/output/cancel/timeout, Stop/recovery, ambient exclusion, explicit extension opt-in and handled commands`,
   );
 }
 try {
