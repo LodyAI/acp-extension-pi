@@ -4,6 +4,7 @@ import { registerMcpTools } from "./mcp.js";
 import { registerBuiltinTools } from "./builtin-tools.js";
 import { registerSubagents } from "./subagents.js";
 import { readWorkspace, workspaceContext } from "./workspace.js";
+import { HistoryPager } from "./history.js";
 /** Loaded inside Pi. Identity travels as native custom-message metadata, never model text. */
 type Content = Array<
   | { type: "text"; text: string }
@@ -19,10 +20,14 @@ export default async function lodyExtension(pi: ExtensionAPI): Promise<void> {
     ctx.ui.notify("lody-rpc:" + JSON.stringify(event), "info");
   // A private invocation per loaded runtime avoids sharing the public command namespace.
   const command = `lody-steer-${randomUUID()}`;
+  const history = new HistoryPager();
   const workspace = readWorkspace();
-  pi.on("before_agent_start", (event) => ({
-    systemPrompt: `${event.systemPrompt}\n\n${workspaceContext(workspace)}`,
-  }));
+  pi.on("before_agent_start", (event) => {
+    history.clear();
+    return {
+      systemPrompt: `${event.systemPrompt}\n\n${workspaceContext(workspace)}`,
+    };
+  });
   registerBuiltinTools(pi, emit);
   const subagent = registerSubagents(pi, emit);
   pi.on("session_before_tree", (_event, ctx) => {
@@ -33,10 +38,12 @@ export default async function lodyExtension(pi: ExtensionAPI): Promise<void> {
     return { cancel: true };
   });
   pi.on("session_shutdown", (_event, ctx) => {
+    history.clear();
     emit(ctx, { type: "lody_not_ready" });
   });
   await registerMcpTools(pi);
   pi.on("session_start", (_event, ctx) => {
+    history.clear();
     emit(ctx, {
       type: "lody_steer_ready",
       version: 1,
@@ -54,9 +61,15 @@ export default async function lodyExtension(pi: ExtensionAPI): Promise<void> {
       };
       if (control.op && control.id) {
         try {
-          const data = await subagent({ ...control, op: control.op });
+          if (control.op === "history" && !ctx.isIdle())
+            throw new Error("Pi history replay requires an idle session");
+          const data =
+            control.op === "history"
+              ? history.page(ctx.sessionManager, control)
+              : await subagent({ ...control, op: control.op });
           emit(ctx, { type: "lody_control", id: control.id, data });
         } catch (error) {
+          if (control.op === "history") history.clear();
           emit(ctx, {
             type: "lody_control",
             id: control.id,

@@ -13,6 +13,7 @@ import {
 } from "acp-extension-core";
 import type { AgentConnection, PiStream } from "./types.js";
 import { PiTransport } from "./transport.js";
+import { readHistory } from "./history.js";
 import {
   piAssistantUsageSchema,
   piModelKey,
@@ -83,12 +84,6 @@ const userContentSchema = z.union([z.string(), contentSchema]);
 const assistantMessageEventSchema = z.object({
   type: z.string(),
   delta: z.string().optional(),
-});
-const entriesSchema = z.object({
-  entries: z.array(
-    z.object({ id: z.string(), parentId: z.string().nullable() }).passthrough(),
-  ),
-  leafId: z.string().nullable(),
 });
 const userEntrySchema = z.union([
   z.object({
@@ -395,17 +390,9 @@ export class PiRpcConnection implements AgentConnection {
 
   /** Replays the native branch Pi will continue from, using Pi's own tool call ids. */
   private async replayHistory(): Promise<void> {
-    const { entries, leafId } = entriesSchema.parse(
-      await this.rpc.request("get_entries"),
+    const branch = await readHistory((fields) =>
+      this.control("history", fields),
     );
-    const byId = new Map(entries.map((entry) => [entry.id, entry]));
-    const branch: typeof entries = [];
-    for (let id = leafId; id;) {
-      const entry = byId.get(id);
-      if (!entry) throw new Error(`Pi session entry is missing: ${id}`);
-      branch.unshift(entry);
-      id = entry.parentId;
-    }
     const results = new Map<
       string,
       z.infer<typeof toolResultEntrySchema>["message"]
@@ -1592,6 +1579,26 @@ export class PiRpcConnection implements AgentConnection {
       throw new Error("Pi session does not match the active session");
   }
 
+  private async control(
+    operation: string,
+    fields: Record<string, unknown> = {},
+  ): Promise<unknown> {
+    this.assertReady();
+    const id = randomUUID();
+    const response = deferred<unknown>();
+    this.controls.set(id, response);
+    try {
+      await this.rpc.request("prompt", {
+        message:
+          `/${this.steerCommand} ` +
+          JSON.stringify({ ...fields, op: operation, id }),
+      });
+      return await response.promise;
+    } finally {
+      this.controls.delete(id);
+    }
+  }
+
   request: AgentConnection["request"] = async <T>(
     method: string,
     params?: unknown,
@@ -1614,20 +1621,7 @@ export class PiRpcConnection implements AgentConnection {
         })
         .parse(params);
       this.assertSession(input.sessionId);
-      this.assertReady();
-      const id = randomUUID();
-      const response = deferred<unknown>();
-      this.controls.set(id, response);
-      try {
-        await this.rpc.request("prompt", {
-          message:
-            `/${this.steerCommand} ` +
-            JSON.stringify({ ...input, op: operation, id }),
-        });
-        return (await response.promise) as T;
-      } finally {
-        this.controls.delete(id);
-      }
+      return (await this.control(operation, input)) as T;
     }
     if (method !== LODY_EXTENSION_METHODS.sessionSteer)
       throw new Error("Pi does not implement this ACP extension");
