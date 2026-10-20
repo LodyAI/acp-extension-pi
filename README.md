@@ -153,7 +153,11 @@ serialization prefix and does not filter nested or later `type` properties.
 
 History load obtains Pi's current branch through the packaged extension's private
 control channel in chunks of at most 1 Mi characters, including entries larger
-than one chunk. Replay checks the leaf identity, page progress, parent continuity,
+than one chunk. A transient iterator traverses the branch once and serializes each
+entry once, retaining only the current encoded entry between pages. The receiver
+scans each chunk once and joins an entry only when complete. Completion, errors,
+explicit close and native session lifecycle changes release the iterator.
+Replay checks the leaf identity, page progress, parent continuity,
 and complete entries before publishing history. Image bytes and native tool ids
 are preserved. Individual entries remain bounded at 16 Mi characters; total
 history may exceed a single RPC record. This bounds wire records, not the full

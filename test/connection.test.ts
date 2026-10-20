@@ -6,7 +6,7 @@ import { join, resolve, normalize } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
 import type * as acp from "@agentclientprotocol/sdk";
 import { PiRpcConnection, initializeResponse } from "../src/connection.js";
-import { historyPage } from "../src/history.js";
+import { HistoryPager } from "../src/history.js";
 import {
   LODY_EXTENSION_METHODS,
   LODY_SUBAGENT_EVENT_METHOD,
@@ -60,6 +60,7 @@ function peer() {
   const commands: Record<string, unknown>[] = [];
   const replies: Record<string, unknown>[] = [];
   const historyControls = new Map<unknown, Record<string, unknown>>();
+  const history = new HistoryPager();
   const promptReceived = deferred();
   const accepted = deferred();
   const questionAnswered = deferred<Record<string, unknown>>();
@@ -123,7 +124,7 @@ function peer() {
           JSON.stringify({
             type: "lody_control",
             id: control.id,
-            data: historyPage(
+            data: history.page(
               { getBranch: () => branch, getLeafId: () => snapshot.leafId },
               control,
             ),
