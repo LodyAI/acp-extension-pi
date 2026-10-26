@@ -6,6 +6,7 @@ import { join, resolve, normalize } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
 import type * as acp from "@agentclientprotocol/sdk";
 import { PiRpcConnection, initializeResponse } from "../src/connection.js";
+import { supportedThinkingLevels } from "../src/model-capabilities.js";
 import {
   LODY_EXTENSION_METHODS,
   LODY_SUBAGENT_EVENT_METHOD,
@@ -38,6 +39,8 @@ const model = {
   provider: "fixture",
   id: "one",
   name: "Fixture",
+  reasoning: true,
+  thinkingLevelMap: { minimal: null, low: null, medium: null, max: null },
 };
 const usage = {
   input: 10,
@@ -119,7 +122,9 @@ function peer() {
     reply(request, state.model);
   };
   let onModels = (request: Record<string, unknown>) =>
-    reply(request, { models: [model, { ...model, id: "two" }] });
+    reply(request, {
+      models: [model, { ...model, id: "two", reasoning: false }],
+    });
   let onEntries = (request: Record<string, unknown>) =>
     reply(request, { entries: [], leafId: null });
   const writable = new WritableStream<Uint8Array>({
@@ -1546,6 +1551,101 @@ describe("native Pi connection", () => {
       1,
     );
     p.close();
+  });
+
+  it("declares every model's thinking ladder in each session response", async () => {
+    const p = peer();
+    p.setModels((request) =>
+      p.reply(request, {
+        models: [
+          model,
+          { provider: "fixture", id: "off", name: "Off", reasoning: false },
+          {
+            provider: "fixture",
+            id: "ext",
+            name: "Ext",
+            reasoning: true,
+            thinkingLevelMap: { medium: null, xhigh: "xhigh", max: null },
+          },
+        ],
+      }),
+    );
+    const expected = {
+      lody: {
+        modelCapabilities: {
+          version: 1,
+          models: {
+            "fixture/one": { effortValues: ["off", "high"] },
+            "fixture/off": { effortValues: ["off"] },
+            "fixture/ext": {
+              effortValues: ["off", "minimal", "low", "high", "xhigh"],
+            },
+          },
+        },
+      },
+    };
+    const created = await start(p);
+    expect(created._meta).toEqual(expected);
+    const resumed = await p.client.resumeSession({
+      sessionId: prompt.sessionId,
+      cwd: "/work",
+      mcpServers: [],
+    });
+    expect(resumed._meta).toEqual(expected);
+    const loaded = await p.client.loadSession({
+      sessionId: prompt.sessionId,
+      cwd: "/work",
+      mcpServers: [],
+    });
+    expect(loaded._meta).toEqual(expected);
+    p.close();
+  });
+
+  it("omits the declaration when Pi omits a model's capability fields", async () => {
+    const p = peer();
+    p.setModels((request) =>
+      p.reply(request, {
+        models: [{ provider: "fixture", id: "one", name: "Fixture" }],
+      }),
+    );
+    const created = await start(p);
+    expect(created._meta).toBeUndefined();
+    const resumed = await p.client.resumeSession({
+      sessionId: prompt.sessionId,
+      cwd: "/work",
+      mcpServers: [],
+    });
+    expect(resumed._meta).toBeUndefined();
+    const loaded = await p.client.loadSession({
+      sessionId: prompt.sessionId,
+      cwd: "/work",
+      mcpServers: [],
+    });
+    expect(loaded._meta).toBeUndefined();
+    p.close();
+  });
+
+  it("mirrors Pi's thinking-level rules", () => {
+    expect(supportedThinkingLevels({ reasoning: false })).toEqual(["off"]);
+    expect(supportedThinkingLevels({ reasoning: true })).toEqual([
+      "off",
+      "minimal",
+      "low",
+      "medium",
+      "high",
+    ]);
+    expect(
+      supportedThinkingLevels({
+        reasoning: true,
+        thinkingLevelMap: { medium: null, xhigh: "xhigh", max: null },
+      }),
+    ).toEqual(["off", "minimal", "low", "high", "xhigh"]);
+    expect(
+      supportedThinkingLevels({
+        reasoning: true,
+        thinkingLevelMap: { max: "max" },
+      }),
+    ).toEqual(["off", "minimal", "low", "medium", "high", "max"]);
   });
 
   it("replaces workspace roots on each activation and rejects invalid attach before any mutation", async () => {
