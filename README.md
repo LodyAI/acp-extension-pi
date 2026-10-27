@@ -1,6 +1,6 @@
 # Pi ACP adapter
 
-A Lody-owned ACP adapter for the pinned official Pi CLI (1.3.0).
+A Lody-owned ACP adapter for the pinned official Pi CLI (1.4.0).
 
 ```text
 Lody → ACP Adapter → official Pi CLI --mode rpc
@@ -26,7 +26,7 @@ Authenticate/configure models through Pi on the execution machine. ACP
 configuration also exposes model and thinking selection. stdout is ACP;
 stderr contains diagnostics.
 
-`LODY_PI_PATH` can select another Pi executable. It must support the Pi 1.3
+`LODY_PI_PATH` can select another Pi executable. It must support the Pi 1.4
 RPC contract and explicit `builtin:codemode` loading, like the bundled runtime.
 
 Extensions are opt-in only. The adapter disables ambient and project
@@ -198,7 +198,8 @@ in the model request, per-response usage, steering, provider-error recovery and
 explicit child model selection and tool isolation.
 The same script accepts an installed dist/index.js path.
 
-Upgrade decision and verification limits: [Pi 1.3 runtime note](.agents/notes/implemented/feature/2026-10-16-pi-1.3-runtime.md).
+Upgrade decision and verification limits: [Pi 1.4 runtime note](.agents/notes/implemented/feature/2026-10-28-pi-1.4-runtime.md).
+The previous runtime contract is recorded in the [Pi 1.3 runtime note](.agents/notes/implemented/feature/2026-10-16-pi-1.3-runtime.md).
 
 The separate Electron acceptance in that note covers one real provider, a locally
 served checksummed managed runtime, and a host-side image attachment submission
