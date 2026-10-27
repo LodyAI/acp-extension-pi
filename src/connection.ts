@@ -68,6 +68,7 @@ const statsSchema = z.object({
 const startupConfigSchema = z.object({
   lody: z.object({
     sessionConfig: z.object({
+      modelId: z.string().optional(),
       configOptionValues: z.record(
         z.string(),
         z.union([z.string(), z.boolean()]),
@@ -370,12 +371,14 @@ export class PiRpcConnection implements AgentConnection {
   ): Promise<acp.NewSessionResponse> {
     const config = startupConfigSchema.safeParse(meta);
     if (config.success) {
-      const values = config.data.lody.sessionConfig.configOptionValues;
-      // Model first: the supported thinking ladder belongs to the selected model.
-      for (const id of ["model", "thinking"]) {
-        const value = values[id];
-        if (typeof value === "string") await this.setOption(id, value);
-      }
+      const { modelId, configOptionValues: values } =
+        config.data.lody.sessionConfig;
+      // Model first: the thinking ladder belongs to the selected model.
+      const model = values.model ?? modelId;
+      if (typeof model === "string") await this.setOption("model", model);
+      const thinking = values.thinking;
+      if (typeof thinking === "string")
+        await this.setOption("thinking", thinking);
     }
     const state = await this.readState();
     if (!state.sessionFile)
