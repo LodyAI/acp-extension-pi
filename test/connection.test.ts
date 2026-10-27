@@ -1583,6 +1583,98 @@ describe("native Pi connection", () => {
     p.close();
   });
 
+  it("prefers modelId over a conflicting model option", async () => {
+    const p = peer();
+    await p.client.initialize({ protocolVersion: 1 });
+    await p.client.newSession({
+      cwd: "/work",
+      mcpServers: [],
+      _meta: {
+        lody: {
+          sessionConfig: {
+            version: 1,
+            modelId: "fixture/one",
+            configOptionValues: { model: "fixture/two" },
+          },
+        },
+      },
+    });
+    expect(
+      p.commands.find((command) => command.type === "set_model"),
+    ).toMatchObject({ provider: "fixture", modelId: "one" });
+    expect(p.state.model.id).toBe("one");
+    p.close();
+  });
+
+  it("falls back to the model option when modelId is absent", async () => {
+    const p = peer();
+    await p.client.initialize({ protocolVersion: 1 });
+    await p.client.newSession({
+      cwd: "/work",
+      mcpServers: [],
+      _meta: {
+        lody: {
+          sessionConfig: {
+            version: 1,
+            configOptionValues: { model: "fixture/one" },
+          },
+        },
+      },
+    });
+    expect(
+      p.commands.find((command) => command.type === "set_model"),
+    ).toMatchObject({ provider: "fixture", modelId: "one" });
+    expect(p.state.model.id).toBe("one");
+    p.close();
+  });
+
+  it("does not let a non-string model option mask modelId", async () => {
+    const p = peer();
+    await p.client.initialize({ protocolVersion: 1 });
+    await p.client.newSession({
+      cwd: "/work",
+      mcpServers: [],
+      _meta: {
+        lody: {
+          sessionConfig: {
+            version: 1,
+            modelId: "fixture/one",
+            configOptionValues: { model: false, thinking: "high" },
+          },
+        },
+      },
+    });
+    expect(
+      p.commands.find((command) => command.type === "set_model"),
+    ).toMatchObject({ provider: "fixture", modelId: "one" });
+    expect(p.state.model.id).toBe("one");
+    expect(p.state.thinkingLevel).toBe("high");
+    p.close();
+  });
+
+  it("keeps the thinking level when modelId is malformed", async () => {
+    const p = peer();
+    await p.client.initialize({ protocolVersion: 1 });
+    await p.client.newSession({
+      cwd: "/work",
+      mcpServers: [],
+      _meta: {
+        lody: {
+          sessionConfig: {
+            version: 1,
+            modelId: 42,
+            configOptionValues: { thinking: "high" },
+          },
+        },
+      },
+    });
+    expect(p.commands.some((command) => command.type === "set_model")).toBe(
+      false,
+    );
+    expect(p.state.thinkingLevel).toBe("high");
+    p.close();
+  });
+
   it("keeps Pi's own model when the startup config carries no model", async () => {
     const p = peer();
     await p.client.initialize({ protocolVersion: 1 });

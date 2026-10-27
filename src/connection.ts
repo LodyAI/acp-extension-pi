@@ -68,11 +68,12 @@ const statsSchema = z.object({
 const startupConfigSchema = z.object({
   lody: z.object({
     sessionConfig: z.object({
-      modelId: z.string().optional(),
-      configOptionValues: z.record(
-        z.string(),
-        z.union([z.string(), z.boolean()]),
-      ),
+      // A malformed field must not discard the rest of the startup config.
+      modelId: z.string().min(1).optional().catch(undefined),
+      configOptionValues: z
+        .record(z.string(), z.union([z.string(), z.boolean()]))
+        .optional()
+        .catch(undefined),
     }),
   }),
 });
@@ -371,11 +372,14 @@ export class PiRpcConnection implements AgentConnection {
   ): Promise<acp.NewSessionResponse> {
     const config = startupConfigSchema.safeParse(meta);
     if (config.success) {
-      const { modelId, configOptionValues: values } =
-        config.data.lody.sessionConfig;
+      const { modelId, configOptionValues } = config.data.lody.sessionConfig;
+      const values = configOptionValues ?? {};
+      // `modelId` wins; the option is a fallback, so guard its type first.
+      const model =
+        modelId ??
+        (typeof values.model === "string" ? values.model : undefined);
       // Model first: the thinking ladder belongs to the selected model.
-      const model = values.model ?? modelId;
-      if (typeof model === "string") await this.setOption("model", model);
+      if (model !== undefined) await this.setOption("model", model);
       const thinking = values.thinking;
       if (typeof thinking === "string")
         await this.setOption("thinking", thinking);
