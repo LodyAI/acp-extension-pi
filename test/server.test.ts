@@ -192,45 +192,57 @@ describe("native session runtime ownership", () => {
     expect(workspace(0).additionalDirectories).toEqual(["/a"]);
   });
 
-  it("forks into an independent target cwd without replacing a live source; busy source rejects before native fork", async () => {
-    const agent = start();
-    const source = await agent.newSession({
-      cwd: "/main",
-      mcpServers: [],
-      additionalDirectories: ["/a"],
-    });
-    mocks.runtimes[0].busy = true;
-    const targetCwd = resolve("fork-target");
-    const request = {
-      sessionId: source.sessionId,
-      cwd: targetCwd,
-      mcpServers: [],
-      additionalDirectories: ["/b"],
-    };
-    await expect(agent.unstable_forkSession!(request)).rejects.toThrow(
-      "active prompt",
-    );
-    expect(mocks.fork).not.toHaveBeenCalled();
-    expect(mocks.launches).toHaveLength(1);
-    mocks.runtimes[0].busy = false;
-    const fork = await agent.unstable_forkSession!(request);
-    expect(fork.sessionId).toBe("/fork.jsonl");
-    expect(mocks.fork).toHaveBeenCalledWith(source.sessionId, targetCwd);
-    expect(mocks.runtimes[0].resumeSession).not.toHaveBeenCalled();
-    expect(workspace(0)).toEqual({
-      cwd: "/main",
-      additionalDirectories: ["/a"],
-    });
-    expect(workspace(1)).toEqual({
-      cwd: targetCwd,
-      additionalDirectories: ["/b"],
-    });
-    await agent.prompt({ sessionId: source.sessionId, prompt: [] });
-    await agent.prompt({ sessionId: fork.sessionId, prompt: [] });
-    expect(
-      mocks.runtimes.every((pi) => pi.prompt.mock.calls.length === 1),
-    ).toBe(true);
-  });
+  it.each([undefined, "completed-leaf"])(
+    "forks independently at %s, admitting an exact boundary while the source runs",
+    async (turnId) => {
+      const agent = start();
+      const source = await agent.newSession({
+        cwd: "/main",
+        mcpServers: [],
+        additionalDirectories: ["/a"],
+      });
+      mocks.runtimes[0].busy = true;
+      const targetCwd = resolve("fork-target");
+      const request = {
+        sessionId: source.sessionId,
+        cwd: targetCwd,
+        mcpServers: [],
+        additionalDirectories: ["/b"],
+        ...(turnId
+          ? { _meta: { lody: { forkAtTurn: { version: 1, turnId } } } }
+          : {}),
+      };
+      if (!turnId) {
+        await expect(agent.unstable_forkSession!(request)).rejects.toThrow(
+          "active prompt",
+        );
+        expect(mocks.launches).toHaveLength(1);
+        mocks.runtimes[0].busy = false;
+      }
+      const fork = await agent.unstable_forkSession!(request);
+      expect(fork.sessionId).toBe("/fork.jsonl");
+      expect(mocks.fork).toHaveBeenCalledWith(
+        source.sessionId,
+        targetCwd,
+        turnId,
+      );
+      expect(mocks.runtimes[0].resumeSession).not.toHaveBeenCalled();
+      expect(workspace(0)).toEqual({
+        cwd: "/main",
+        additionalDirectories: ["/a"],
+      });
+      expect(workspace(1)).toEqual({
+        cwd: targetCwd,
+        additionalDirectories: ["/b"],
+      });
+      expect(
+        await agent.prompt({ sessionId: source.sessionId, prompt: [] }),
+      ).toEqual({ stopReason: "end_turn" });
+      expect(
+        await agent.prompt({ sessionId: fork.sessionId, prompt: [] }),
+      ).toEqual({ stopReason: "end_turn" });
+    },
+  );
 
   it("cold-loads once, rejects competing lifecycle requests, and closes every private runtime", async () => {
     const agent = start();

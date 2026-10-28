@@ -1,3 +1,4 @@
+import { z } from "zod";
 import type { ChildProcess } from "node:child_process";
 import spawn from "cross-spawn";
 import { Readable, Writable } from "node:stream";
@@ -15,6 +16,7 @@ import {
   LODY_EXTENSION_METHODS,
   normalizeLodyExtensionMethod,
   supportsLodySubagentEvents,
+  type LodySessionMeta,
 } from "acp-extension-core";
 import { PiStderrDiagnostics } from "./diagnostics.js";
 import { PiRpcConnection, initializeResponse } from "./connection.js";
@@ -367,11 +369,22 @@ export function serve(stream: Stream, piArgs: string[] = []) {
       unstable_forkSession: (request) =>
         lifecycle(async () => {
           validate(request);
+          const selection = z
+            .object({
+              version: z.literal(1),
+              turnId: z.string().min(1).optional(),
+            })
+            .optional()
+            .parse(
+              (request._meta?.lody as LodySessionMeta | undefined)?.forkAtTurn,
+            );
+          const turnId = selection?.turnId;
           const workspace = validateWorkspace(request);
           const fork = async () => {
             const sessionId = await forkPiSession(
               request.sessionId,
               workspace.cwd,
+              turnId,
             );
             return activate(
               workspace,
@@ -383,7 +396,7 @@ export function serve(stream: Stream, piArgs: string[] = []) {
             );
           };
           const source = sessions.get(request.sessionId);
-          return source ? source.withIdle(fork) : fork();
+          return source && !turnId ? source.withIdle(fork) : fork();
         }),
       listSessions: listPiSessions,
       prompt: async (request) => get(request.sessionId).prompt(request),

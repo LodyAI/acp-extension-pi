@@ -882,6 +882,20 @@ export class PiRpcConnection implements AgentConnection {
         .object({ type: z.string() })
         .passthrough()
         .parse(JSON.parse(event.message.slice("lody-rpc:".length)));
+      if (payload.type === "lody_turn_boundary") {
+        const { turnId } = z
+          .object({ turnId: z.string().min(1) })
+          .parse(payload);
+        if (this.active) {
+          await this.emitDeltas(this.blockDeltas.close());
+          await this.update({
+            sessionUpdate: "agent_message_chunk",
+            content: { type: "text", text: "" },
+            _meta: { lody: { turnId } },
+          });
+        }
+        return;
+      }
       if (payload.type === "lody_control") {
         const response = this.controls.get(String(payload.id));
         if (payload.error) response?.reject(new Error(String(payload.error)));
@@ -1727,6 +1741,7 @@ export function initializeResponse(): acp.InitializeResponse {
       _meta: {
         lody: {
           usage: { version: 1 },
+          forkAtTurn: { version: 1 },
           subagentEvents: { version: 1 },
           compaction: { version: 1 },
           subagents: {

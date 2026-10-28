@@ -16,8 +16,9 @@ cwd；接受指向同一目录的符号链接。fork 可以选择独立的目标
 ## 所有权
 
 每个活跃原生会话拥有独立官方 RPC 进程和私有 workspace/MCP 配置文件。
-原生文件路径直接作为路由键，不进行身份转换。生命周期操作互斥；分叉活跃
-源会话时占用其配置锁，拒绝正在执行任务的源会话。
+原生文件路径直接作为路由键，不进行身份转换。生命周期操作互斥；未指定边界的
+分叉占用源配置锁，拒绝正在执行任务的源会话。指定边界时只读取已完成的原生
+前缀，不修改或锁住源 runtime。
 
 Packaged extension 在原生 attach 时读取目录快照，通过 before_agent_start
 在现有系统提示词后追加目录上下文。Pi 将该系统提示词投影到模型请求而不写入
@@ -25,8 +26,12 @@ Packaged extension 在原生 attach 时读取目录快照，通过 before_agent_
 和用户资源继续生效。子代理通过显式加载的纯上下文扩展钩子接收相同目录快照，不覆盖用户原生提示词，
 原有扩展、MCP、工具隔离和执行所有权保持不变。
 
-fork 调用官方 SessionManager.forkFrom（CLI --fork 的原语），再独立启动 RPC。
-不导航或替换源 runtime；Pi 复制所有非 header 原生条目及其身份，child 获得
+未指定边界时调用官方 SessionManager.forkFrom（CLI --fork 的原语）。Core
+forkAtTurn 通过独立 SessionManager 的 createBranchedSession 复制选定的原生分支，
+再独立启动 RPC。turnId 使用 agent_settled 后的原生 leaf，包含工具结果和压缩条目；
+Pi 1.3 的普通助手消息不会触发 entry_appended。内置扩展直接读取 getLeafId，
+避免每轮通过 get_entries 传输整段历史并触及 RPC 记录大小上限。不导航或替换源 runtime；
+Pi 复制原生条目及其身份，child 获得
 新原生 ID/header/path。session_start 钩子通过 Pi 工具 API 补入本次选择的 MCP
 工具声明，避免历史工具集合漏掉新 MCP 名称；原生 codemode 可见性与非 MCP 工具
 选择继续生效。MCP 与启动 model/thinking 配置仅作用于目标 runtime。
@@ -49,13 +54,7 @@ cwd 仍是相对路径基准。额外目录不会触发项目配置或扩展发�
 上下文、Read/Write/Bash 效果、子代理继承、冷热 load/resume、fork 独立 cwd、
 父子兄弟隔离、原生历史以及 fork 不发起模型请求。
 
-本地 macOS / Node 22.20.0 验证结果：
-
-- `pnpm check` 通过：typecheck、102 项测试通过（1 项平台相关跳过）、格式检查。
-- `pnpm build` 通过。
-- `pnpm smoke` 普通工具及 codemode-only 两模式通过。
-- `pnpm pack` 后独立临时安装，同一完整 smoke 两模式通过；包含新增上下文模块。
-- 修复响应写入与关闭竞态后，16 次独立官方 CLI 启动失败探针均先返回完整 ACP 诊断再退出。
-
-没有访问商业模型。本地未执行 Linux 或 Windows 验证。
-交付状态：以 main 为目标的 Draft PR，等待审查；不合并、不发布、不修改 Lody runtime pins。
+`test/sessions.test.ts` 验证精确原生前缀和源文件不变；
+`test/connection.test.ts` 验证 prompt 完成前发布边界。
+`scripts/smoke.mjs` 在后续模型请求被挂起时分叉已完成边界，并验证子会话实际
+发送给模型的上下文及源会话独立继续执行。本地未执行 Linux 或 Windows 验证。

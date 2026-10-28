@@ -19,8 +19,9 @@ fork acceptance; no implementation is added for that case.
 
 The adapter owns one official RPC process and private workspace/MCP files per
 active native session. The routing key is the native file path, not an identity
-translation. Lifecycle operations are excluded from one another; live-source
-fork holds its connection configuration lock and rejects active work.
+translation. Lifecycle operations are excluded from one another. Untargeted
+fork holds the source configuration lock and rejects active work; a targeted
+fork reads a completed native prefix without changing or locking the source runtime.
 
 The packaged extension snapshots the workspace configuration on native attach.
 A before_agent_start hook appends the directory context to the current system
@@ -30,9 +31,14 @@ The existing system prompt and configured user resources remain in effect.
 Subagents receive the same snapshot through an explicit context-only extension hook;
 they keep their existing extension/MCP/tool isolation and execution ownership.
 
-Fork calls official SessionManager.forkFrom (the CLI --fork primitive) and then
-attaches a separate RPC process. The source runtime is never navigated or
-replaced. Native non-header entries are copied by Pi, including their identities;
+Untargeted fork calls official SessionManager.forkFrom (the CLI --fork primitive).
+Core forkAtTurn uses a separate SessionManager and createBranchedSession to copy
+only the selected native branch, then attaches a separate RPC process. The opaque
+turnId is the native leaf after agent_settled, including tool results and compaction;
+Pi 1.3 does not emit entry_appended for ordinary assistant messages. The packaged
+extension reads getLeafId directly, avoiding a full get_entries transcript response
+on every prompt and the transport's record size limit. The source runtime
+is never navigated or replaced. Native entries are copied by Pi, including their identities;
 the child gets a new native ID/header/path. A session_start hook reconciles newly
 selected MCP tool declarations through Pi's tool API: restored transcript loadouts otherwise omit new MCP names. Native
 codemode visibility and non-MCP tool selections remain authoritative.
@@ -62,16 +68,8 @@ local deterministic model: model directory context, Read/Write/Bash effects,
 subagent inheritance, hot/cold load/resume, independent fork cwd, parent/sibling
 isolation, native history and no model call during fork.
 
-Verified locally on macOS with Node 22.20.0:
-
-- `pnpm check`: typecheck, 102 passing tests (one platform-specific skip), formatting.
-- `pnpm build`: passed.
-- `pnpm smoke`: passed in ordinary and codemode-only modes.
-- `pnpm pack`, a separate temporary install, and the same complete smoke against
-  the installed adapter: passed in both modes; the new context modules are packed.
-- Sixteen isolated official-CLI startup-failure probes all delivered full ACP
-  diagnostics before exit after fixing the response-write shutdown race.
-
-No commercial provider was contacted. Linux and Windows were not executed locally.
-Delivery: Draft PR for review against main. This change does not merge, publish,
-or update Lody runtime pins.
+`test/sessions.test.ts` checks exact native prefixes and source preservation;
+`test/connection.test.ts` checks boundary publication before prompt completion.
+`scripts/smoke.mjs` forks a completed boundary while a later model request is held,
+then verifies the child's actual model context and independent source continuation.
+Linux and Windows were not executed locally.

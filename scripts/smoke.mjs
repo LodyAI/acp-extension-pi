@@ -299,7 +299,8 @@ const acpReasoningChunks = (events) =>
       (update) =>
         (update.sessionUpdate === "agent_message_chunk" ||
           update.sessionUpdate === "agent_thought_chunk") &&
-        update.content?.type === "text",
+        update.content?.type === "text" &&
+        update.content.text.length > 0,
     )
     .map(({ sessionUpdate, content }) => ({ sessionUpdate, content }));
 const assertReasoningOutput = (events, expected) => {
@@ -803,6 +804,78 @@ async function exerciseWorkspace() {
   );
 }
 
+async function exerciseTurnFork() {
+  const source = await start();
+  assert.equal(source.capabilities._meta.lody.forkAtTurn.version, 1);
+  await source.prompt("FORK_PREFIX");
+  const turnId = updates.findLast((update) => update._meta?.lody?.turnId)?._meta
+    .lody.turnId;
+  assert.ok(turnId, "settled prompt publishes a native boundary");
+  const prefix = (await readFile(source.id, "utf8"))
+    .trim()
+    .split("\n")
+    .slice(1)
+    .map(JSON.parse);
+  assert.equal(prefix.at(-1).id, turnId);
+  await source.prompt("FORK_LATER");
+  const held = new Promise((resolve) => {
+    mainRequest = resolve;
+  });
+  let settled = false;
+  const running = source.prompt("STEER_HOLD").then((result) => {
+    settled = true;
+    return result;
+  });
+  await held;
+  try {
+    const child = await source.client.unstable_forkSession({
+      sessionId: source.id,
+      cwd: root,
+      mcpServers: [],
+      _meta: { lody: { forkAtTurn: { version: 1, turnId } } },
+    });
+    assert.equal(settled, false, "source continues running during the fork");
+    const branch = (await readFile(child.sessionId, "utf8"))
+      .trim()
+      .split("\n")
+      .slice(1)
+      .map(JSON.parse);
+    assert.deepEqual(
+      branch,
+      prefix,
+      "fork contains exactly the selected native prefix",
+    );
+    const before = bodies.length;
+    await source.client.prompt({
+      sessionId: child.sessionId,
+      prompt: [{ type: "text", text: "FORK_CHILD" }],
+    });
+    const context = JSON.stringify(bodies[before].messages);
+    assert.ok(context.includes("FORK_PREFIX"));
+    assert.ok(
+      !context.includes("FORK_LATER") && !context.includes("STEER_HOLD"),
+    );
+    await assert.rejects(
+      source.client.unstable_forkSession({
+        sessionId: source.id,
+        cwd: root,
+        mcpServers: [],
+        _meta: {
+          lody: { forkAtTurn: { version: 1, turnId: "unknown-entry" } },
+        },
+      }),
+    );
+  } finally {
+    releaseMain();
+    assert.equal((await running).stopReason, "end_turn");
+  }
+  assert.equal(
+    (await source.prompt("FORK_SOURCE_CONTINUES")).stopReason,
+    "end_turn",
+  );
+  await source.close();
+}
+
 async function exercise(mode) {
   codemodeOnly = mode;
   deadline.refresh();
@@ -817,6 +890,7 @@ async function exercise(mode) {
     : {};
   await writeFile(join(profile, "settings.json"), JSON.stringify(settings));
   await exerciseWorkspace();
+  await exerciseTurnFork();
   bodies.length = 0;
   updates.length = 0;
   const a = await start();
