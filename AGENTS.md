@@ -45,6 +45,8 @@ workspace packages or reimplement Pi's executor.
   session/list reads Pi's native files without starting Pi. session/load
   switches like resume, then replays only the current branch from Pi's entries
   with Pi's tool call ids and each todo snapshot at its original position.
+  Fork boundaries are native leaf IDs published after Pi settles. Exact forks copy
+  that branch without locking the running source; untargeted forks require idle.
 - Steering uses native custom-message metadata, never matching text. Emit the Core
   applied notification before later output; Lody owns its application barrier.
 - Keep diagnostics separate from model outcomes. Preserve native error, length

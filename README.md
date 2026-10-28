@@ -93,8 +93,10 @@ Fork uses Pi's native file-fork mechanism for existing persisted history, create
 a new native ID/file and preserves the source file and active runtime. It copies
 native history rather than sending history as a prompt. Each session has its own
 RPC process and private workspace/MCP configuration; parent, child and sibling
-sessions remain independently addressable on the connection. A fork of a live
-source requires it to be idle. Connection close cleans up all owned runtimes;
+sessions remain independently addressable on the connection. Core `forkAtTurn`
+selects a native branch through the `turnId` emitted after Pi settles a prompt.
+An exact boundary can be forked while the source continues running; an untargeted
+fork still requires the source to be idle. Connection close cleans up all owned runtimes;
 an unexpected Pi exit still fails the entire connection. Empty, never-persisted
 sessions are outside the recovery/fork contract.
 

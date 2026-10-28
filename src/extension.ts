@@ -44,6 +44,10 @@ export default async function lodyExtension(pi: ExtensionAPI): Promise<void> {
       sessionFile: ctx.sessionManager.getSessionFile(),
     });
   });
+  pi.on("agent_settled", (_event, ctx) => {
+    const turnId = ctx.sessionManager.getLeafId();
+    if (turnId) emit(ctx, { type: "lody_turn_boundary", turnId });
+  });
   pi.registerCommand(command, {
     description: "Lody internal steering transport",
     async handler(args, ctx) {

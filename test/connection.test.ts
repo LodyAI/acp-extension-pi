@@ -311,6 +311,31 @@ const lodyEvent = (payload: Record<string, unknown>) => ({
 });
 
 describe("native Pi connection", () => {
+  it("publishes the settled native leaf as the fork boundary before completing the prompt", async () => {
+    const p = peer();
+    await start(p);
+    p.setEntries((request) =>
+      p.reply(request, undefined, "must not read the transcript"),
+    );
+    p.setPrompt((request) => {
+      p.reply(request, { disposition: "started" });
+      p.emit({ type: "agent_start" });
+      p.emit(text("completed response"));
+      p.emit(lodyEvent({ type: "lody_turn_boundary", turnId: "settled-leaf" }));
+      p.finish();
+    });
+    expect(await p.client.prompt(prompt)).toEqual({ stopReason: "end_turn" });
+    expect(p.updates.map(({ update }) => update)).toContainEqual({
+      sessionUpdate: "agent_message_chunk",
+      content: { type: "text", text: "" },
+      _meta: { lody: { turnId: "settled-leaf" } },
+    });
+    expect(initializeResponse().agentCapabilities?._meta).toMatchObject({
+      lody: { forkAtTurn: { version: 1 } },
+    });
+    p.close();
+  });
+
   it("completes handled input without a model event and admits the next prompt", async () => {
     const p = peer();
     await start(p);
