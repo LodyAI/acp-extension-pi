@@ -335,14 +335,11 @@ export class PiRpcConnection implements AgentConnection {
     this.open(request, false);
 
   loadSession: AgentConnection["loadSession"] = async (request) => {
-    const { configOptions, _meta } = await this.open(request, true);
-    return { configOptions, _meta };
+    const { sessionId: _, ...response } = await this.open(request, true);
+    return response;
   };
 
-  private async open(
-    request: acp.ResumeSessionRequest,
-    replay: boolean,
-  ): Promise<acp.NewSessionResponse> {
+  private async open(request: acp.ResumeSessionRequest, replay: boolean) {
     const workspace = validateWorkspace(request);
     // Invalid attach requests must not retire the current identity, roots or MCP clients.
     await validateSessionCwd(request.sessionId, workspace.cwd);
@@ -369,7 +366,9 @@ export class PiRpcConnection implements AgentConnection {
   private async prepare(
     meta: unknown,
     replay = false,
-  ): Promise<acp.NewSessionResponse> {
+  ): Promise<
+    acp.NewSessionResponse & { availableCommands: acp.AvailableCommand[] }
+  > {
     const config = startupConfigSchema.safeParse(meta);
     if (config.success) {
       const { modelId, configOptionValues } = config.data.lody.sessionConfig;
@@ -400,8 +399,47 @@ export class PiRpcConnection implements AgentConnection {
       this.pendingPlan = undefined;
     }
     const { configOptions, capabilityMeta } = await this.readConfig();
+    const availableCommands = await this.readCommands();
+    await this.update({
+      sessionUpdate: "available_commands_update",
+      availableCommands,
+    });
     await this.reportUsage();
-    return { sessionId: this.sessionId, configOptions, _meta: capabilityMeta };
+    return {
+      sessionId: this.sessionId,
+      configOptions,
+      _meta: capabilityMeta,
+      availableCommands,
+    };
+  }
+
+  private async readCommands(): Promise<acp.AvailableCommand[]> {
+    const { commands } = z
+      .object({
+        commands: z.array(
+          z.object({
+            name: z.string().min(1),
+            description: z.string().optional(),
+          }),
+        ),
+      })
+      .parse(await this.rpc.request("get_commands"));
+    const available = new Map<string, acp.AvailableCommand>([
+      ["stats", { name: "stats", description: "Show session statistics" }],
+      [
+        "compact",
+        { name: "compact", description: "Compact the session context" },
+      ],
+    ]);
+    for (const command of commands) {
+      if (command.name === this.steerCommand || available.has(command.name))
+        continue;
+      available.set(command.name, {
+        name: command.name,
+        description: command.description ?? "",
+      });
+    }
+    return [...available.values()];
   }
 
   /** Replays the native branch Pi will continue from, using Pi's own tool call ids. */

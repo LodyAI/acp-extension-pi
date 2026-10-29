@@ -72,6 +72,9 @@ workspace packages or reimplement Pi's executor.
   MCP result so image blocks remain callable through image(). Configuration secrets stay
   in private temporary files, never native history.
 - Use acp-extension-core contracts. Advertise only implemented capabilities.
+  Activation publishes one command catalog in the session response (Lody capability
+  discovery) and ACP available_commands_update. Pi owns discovered commands; the
+  adapter adds only stats/compact and hides its private steering command.
   No permission modes, arbitrary plugin compatibility, TUI, Plan Mode, runtime
   preset/tools plugins or detached subagent jobs in V1.
 - Tests use synthetic inputs and explicit signals, no real sleeps or commercial

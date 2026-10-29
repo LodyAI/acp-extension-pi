@@ -64,6 +64,10 @@ runtime is still required before this reaches Lody's installed Pi provider.
   history. Compaction summaries and other branches are not replayed. A missing
   session file fails resume/load instead of starting an empty session.
 - Acknowledged steering using acp-extension-core identity metadata.
+- Slash-command discovery on new/resume/load/fork: `/stats`, `/compact`, and
+  Pi's loaded extension, prompt-template and skill commands. The private steering
+  command is hidden. Commands keep Pi's native execution semantics; terminal-only
+  UI and detached extension work are not supported.
 - Per-response token usage by model (including compaction summaries and
   subagents), native context snapshots, automatic compaction activity and /compact.
 - ACP-selected stdio MCP tools with text/image results and cancellation.
