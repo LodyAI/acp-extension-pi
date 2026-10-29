@@ -128,6 +128,8 @@ function peer() {
     });
   let onEntries = (request: Record<string, unknown>) =>
     reply(request, { entries: [], leafId: null });
+  let onCommands = (request: Record<string, unknown>) =>
+    reply(request, { commands: [] });
   const writable = new WritableStream<Uint8Array>({
     write(bytes) {
       const request: Record<string, unknown> = JSON.parse(
@@ -172,6 +174,9 @@ function peer() {
           break;
         case "get_entries":
           onEntries(request);
+          break;
+        case "get_commands":
+          onCommands(request);
           break;
         case "set_thinking_level":
           state.thinkingLevel = String(request.level);
@@ -253,6 +258,9 @@ function peer() {
     setEntries(handler: typeof onEntries) {
       onEntries = handler;
     },
+    setCommands(handler: typeof onCommands) {
+      onCommands = handler;
+    },
     get client() {
       return (client ??= new PiRpcConnection(stream, host));
     },
@@ -312,6 +320,76 @@ const lodyEvent = (payload: Record<string, unknown>) => ({
 });
 
 describe("native Pi connection", () => {
+  it("publishes the current command catalog on new, resume and load", async () => {
+    const p = peer();
+    let commands = [
+      {
+        name: "compact",
+        description: "Shadowed extension",
+        source: "extension",
+      },
+      { name: "lody-steer", source: "extension" },
+      { name: "review", description: "Review changes", source: "prompt" },
+      { name: "skill:testing", source: "skill" },
+      { name: "handled", description: "Local action", source: "extension" },
+    ];
+    p.setCommands((request) => p.reply(request, { commands }));
+    const created = await start(p);
+    const catalogs = () =>
+      p.updates.flatMap(({ sessionId, update }) => {
+        expect(sessionId).toBe(nativeSession);
+        return update.sessionUpdate === "available_commands_update"
+          ? [update.availableCommands]
+          : [];
+      });
+    expect(catalogs()).toEqual([
+      [
+        { name: "stats", description: "Show session statistics" },
+        { name: "compact", description: "Compact the session context" },
+        { name: "review", description: "Review changes" },
+        { name: "skill:testing", description: "" },
+        { name: "handled", description: "Local action" },
+      ],
+    ]);
+    expect(created).toMatchObject({ availableCommands: catalogs()[0] });
+    commands = [];
+    for (const method of ["resumeSession", "loadSession"] as const) {
+      p.updates.length = 0;
+      const response = await p.client[method]({
+        sessionId: nativeSession,
+        cwd: "/work",
+        mcpServers: [],
+      });
+      expect(catalogs()).toEqual([
+        [
+          { name: "stats", description: "Show session statistics" },
+          { name: "compact", description: "Compact the session context" },
+        ],
+      ]);
+      expect(response).toMatchObject({ availableCommands: catalogs()[0] });
+    }
+    p.close();
+  });
+
+  it.each(["error", "malformed"])(
+    "does not hide a %s command catalog failure",
+    async (failure) => {
+      const p = peer();
+      p.setCommands((request) =>
+        failure === "error"
+          ? p.reply(request, undefined, "command discovery failed")
+          : p.reply(request, { commands: [{ name: 42 }] }),
+      );
+      await expect(start(p)).rejects.toThrow();
+      expect(
+        p.updates.some(
+          ({ update }) => update.sessionUpdate === "available_commands_update",
+        ),
+      ).toBe(false);
+      p.close();
+    },
+  );
+
   it("publishes the settled native leaf as the fork boundary before completing the prompt", async () => {
     const p = peer();
     await start(p);
@@ -1295,6 +1373,7 @@ describe("native Pi connection", () => {
     const history = p.updates.filter(
       (n) =>
         n.update.sessionUpdate !== "usage_update" &&
+        n.update.sessionUpdate !== "available_commands_update" &&
         !n.update._meta?.lody?.activity &&
         n.update.sessionUpdate !== "config_option_update",
     );
@@ -1982,7 +2061,13 @@ describe("native Pi connection", () => {
       sessionPath: prompt.sessionId,
     });
     const plan = [{ content: "Ship", priority: "medium", status: "pending" }];
-    expect(p.updates.map((u) => u.update)).toEqual([
+    expect(
+      p.updates
+        .map((u) => u.update)
+        .filter(
+          (update) => update.sessionUpdate !== "available_commands_update",
+        ),
+    ).toEqual([
       {
         sessionUpdate: "user_message_chunk",
         content: { type: "text", text: "hello" },

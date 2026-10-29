@@ -418,10 +418,13 @@ async function start(
   );
   children.add(child);
   child.stderr.pipe(process.stderr);
+  let availableCommands;
   const client = new ClientSideConnection(
     () => ({
       sessionUpdate: async ({ update }) => {
         updates.push(update);
+        if (update.sessionUpdate === "available_commands_update")
+          availableCommands = update.availableCommands;
       },
       unstable_createElicitation: (request) => answer(request),
       requestPermission: async () => ({ outcome: { outcome: "cancelled" } }),
@@ -458,7 +461,18 @@ async function start(
     ? await client[open]({ sessionId, cwd: root, mcpServers, ...activation })
     : await client.newSession({ cwd: root, mcpServers, ...activation });
   const id = result.sessionId ?? sessionId;
+  assert.deepEqual(
+    result.availableCommands,
+    availableCommands,
+    "capability response and notification share the command catalog",
+  );
+  assert.ok(availableCommands?.some((command) => command.name === "stats"));
+  assert.ok(availableCommands?.some((command) => command.name === "compact"));
+  assert.ok(
+    !availableCommands.some((command) => command.name.startsWith("lody-steer")),
+  );
   return {
+    availableCommands,
     process: child,
     client,
     id,
@@ -1394,7 +1408,14 @@ async function exercise(mode) {
     "extension provider model is advertised",
   );
   const beforeHandled = bodies.length;
-  assert.equal((await c.prompt("/lody-smoke-handled")).stopReason, "end_turn");
+  const handledCommand = c.availableCommands.find(
+    (command) => command.name === "lody-smoke-handled",
+  );
+  assert.ok(handledCommand, "explicit extension command is advertised");
+  assert.equal(
+    (await c.prompt(`/${handledCommand.name}`)).stopReason,
+    "end_turn",
+  );
   assert.equal(
     bodies.length,
     beforeHandled,
