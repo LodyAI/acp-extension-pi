@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join, resolve, normalize } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
 import type * as acp from "@agentclientprotocol/sdk";
+import { VERSION } from "@earendil-works/pi-coding-agent";
 import { PiRpcConnection, initializeResponse } from "../src/connection.js";
 import { supportedThinkingLevels } from "../src/model-capabilities.js";
 import {
@@ -2233,6 +2234,11 @@ describe("native Pi connection", () => {
     expect(resumed?._meta?.lody?.usageScopeId).not.toBe(firstScope);
     expect(resumed?.modelUsage?.["fixture/one"]?.inputTokens).toBe(10);
     p.close();
+  });
+
+  it("reports the Pi release it actually runs", () => {
+    // A pin bump that forgets PI_RPC_VERSION would tell every client the wrong version.
+    expect(initializeResponse().agentInfo?.version).toBe(VERSION);
   });
 
   it("keeps stats for context occupancy only, never replaying resumed history as usage", async () => {
