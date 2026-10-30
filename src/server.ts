@@ -311,12 +311,17 @@ export function serve(stream: Stream, piArgs: string[] = []) {
       if (
         request.mcpServers?.some(
           (server) =>
-            !server || typeof server !== "object" || !("command" in server),
+            !server ||
+            typeof server !== "object" ||
+            !(
+              "command" in server ||
+              (server as { type?: string }).type === "http"
+            ),
         )
       )
         throw RequestError.invalidRequest(
           undefined,
-          "Pi supports stdio MCP servers only",
+          "Pi supports stdio and streamable HTTP MCP servers only",
         );
     };
     return {

@@ -70,7 +70,7 @@ runtime is still required before this reaches Lody's installed Pi provider.
   UI and detached extension work are not supported.
 - Per-response token usage by model (including compaction summaries and
   subagents), native context snapshots, automatic compaction activity and /compact.
-- ACP-selected stdio MCP tools with text/image results and cancellation.
+- ACP-selected stdio and streamable HTTP MCP tools with text/image results and cancellation. Legacy SSE and ACP transports are not supported.
 - Questionnaire: one or more questions in Lody's existing question card.
 - Todo: list/add/toggle/clear through Lody's existing checklist.
 - Subagent: native Lody task lifecycle, list, output and individual cancellation.
