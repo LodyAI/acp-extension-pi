@@ -1798,6 +1798,7 @@ export function initializeResponse(): acp.InitializeResponse {
         },
       },
       promptCapabilities: { image: true, embeddedContext: true },
+      mcpCapabilities: { http: true },
       loadSession: true,
       sessionCapabilities: {
         resume: {},

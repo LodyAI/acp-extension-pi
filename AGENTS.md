@@ -13,7 +13,7 @@ workspace packages or reimplement Pi's executor.
   extension, never the packaged tools extension. This is a supported-feature boundary, not a sandbox against
   arbitrary bash: selected extension code can add tools and no arbitrary
   plugin compatibility is promised.
-- Packaged tools are questionnaire, todo, subagent and ACP-selected stdio MCP
+- Packaged tools are questionnaire, todo, subagent and ACP-selected stdio and streamable HTTP MCP
   tools. Their execute promises own all work. No detached callbacks, hot reload,
   extension-driven session replacement or custom compaction.
 - Only the main agent asks questions. Questionnaire handles one or many questions

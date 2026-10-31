@@ -128,6 +128,59 @@ afterEach(async () => {
 });
 
 describe("native session runtime ownership", () => {
+  it.each([
+    "newSession",
+    "resumeSession",
+    "loadSession",
+    "unstable_forkSession",
+  ] as const)("accepts streamable HTTP MCP servers on %s", async (method) => {
+    const agent = start();
+    const http = {
+      name: "remote",
+      type: "http",
+      url: "https://mcp.example.com/mcp",
+      headers: [{ name: "Authorization", value: "Bearer token" }],
+    };
+    const sessionId = "/session-0.jsonl";
+    if (method === "newSession") {
+      await expect(
+        agent[method]({ cwd: "/main", mcpServers: [http] }),
+      ).resolves.toMatchObject({ sessionId });
+    } else if (method === "unstable_forkSession") {
+      await agent.newSession({ cwd: "/main", mcpServers: [] });
+      await expect(
+        agent[method]!({ sessionId, cwd: "/main", mcpServers: [http] }),
+      ).resolves.toBeTruthy();
+    } else {
+      await agent.newSession({ cwd: "/main", mcpServers: [] });
+      await expect(
+        agent[method]!({ sessionId, cwd: "/main", mcpServers: [http] }),
+      ).resolves.toBeTruthy();
+    }
+  });
+
+  it.each(["sse", "acp"] as const)(
+    "still rejects %s MCP transports with a specific message",
+    async (type) => {
+      const agent = start();
+      const server =
+        type === "sse"
+          ? {
+              name: "legacy",
+              type,
+              url: "https://mcp.example.com/sse",
+              headers: [],
+            }
+          : { name: "nested", type, serverId: "srv-1" };
+      await expect(
+        agent.newSession({ cwd: "/main", mcpServers: [server as never] }),
+      ).rejects.toThrow(
+        "Pi supports stdio and streamable HTTP MCP servers only",
+      );
+      expect(mocks.launches).toHaveLength(0);
+    },
+  );
+
   it("routes independent new sessions and keeps activation directory replacement private", async () => {
     const agent = start();
     const first = await agent.newSession({
