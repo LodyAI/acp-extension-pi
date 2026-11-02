@@ -11,6 +11,10 @@ const response = z.object({
   error: z.string().optional(),
 });
 const MAX_RECORD_CHARACTERS = 16 * 1024 * 1024;
+// Pi 1.3 serializes these with type first. ACP already receives each message/tool
+// result and settles on agent_settled; neither aggregate has another consumer.
+// Recognize only the pinned wire prefix, never a nested or later "type" field.
+const REDUNDANT_AGGREGATE = /^\{"type":"(?:turn_end|agent_end)"[,}]/;
 
 /** Only LF delimits records; Unicode line separators belong to JSON strings. */
 export class PiTransport {
@@ -87,48 +91,62 @@ export class PiTransport {
     this.onFailure(this.failure);
   }
 
+  private receive(line: string): void {
+    if (!line) return;
+    const event = envelope.parse(JSON.parse(line));
+    if (event.type === "response") {
+      const reply = response.parse(event);
+      const pending = this.pending.get(reply.id);
+      if (!pending) return;
+      if (reply.command !== pending.command)
+        throw new Error("Pi RPC response command mismatch");
+      this.pending.delete(reply.id);
+      if (reply.success) pending.resolve(reply.data);
+      else
+        pending.reject(new Error(reply.error ?? `Pi ${reply.command} failed`));
+    } else {
+      // Replies remain readable while a notification is being applied to history.
+      this.events = this.events.then(() => this.onEvent(event));
+      void this.events.catch((error: unknown) => this.fail(error));
+    }
+  }
+
   private async read(readable: ReadableStream<Uint8Array>): Promise<void> {
     const reader = readable.getReader();
     const decoder = new TextDecoder("utf-8", { fatal: true });
     let buffer = "";
+    let discarding = false;
     try {
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-        let end: number;
-        while ((end = buffer.indexOf("\n")) !== -1) {
-          if (end > MAX_RECORD_CHARACTERS)
-            throw new Error("Pi RPC record exceeds the size limit");
-          const line = buffer.slice(0, end).replace(/\r$/, "");
-          buffer = buffer.slice(end + 1);
-          if (!line) continue;
-          const event = envelope.parse(JSON.parse(line));
-          if (event.type === "response") {
-            const reply = response.parse(event);
-            const pending = this.pending.get(reply.id);
-            if (!pending) continue;
-            if (reply.command !== pending.command)
-              throw new Error("Pi RPC response command mismatch");
-            this.pending.delete(reply.id);
-            if (reply.success) pending.resolve(reply.data);
-            else
-              pending.reject(
-                new Error(reply.error ?? `Pi ${reply.command} failed`),
-              );
-          } else {
-            // Replies remain readable while a notification is being applied to history.
-            this.events = this.events.then(() => this.onEvent(event));
-            void this.events.catch((error: unknown) => this.fail(error));
+        const chunk = decoder.decode(value, { stream: true });
+        let start = 0;
+        while (start < chunk.length) {
+          const end = chunk.indexOf("\n", start);
+          if (!discarding) {
+            buffer += chunk.slice(start, end === -1 ? undefined : end);
+            if (REDUNDANT_AGGREGATE.test(buffer)) {
+              // Drain unused bodies to LF without buffering/JSON-parsing another
+              // copy of all images in this turn/run. Never discard required events.
+              discarding = true;
+              buffer = "";
+            } else if (buffer.length > MAX_RECORD_CHARACTERS) {
+              throw new Error("Pi RPC record exceeds the size limit");
+            }
           }
+          if (end === -1) break;
+          if (!discarding) this.receive(buffer.replace(/\r$/, ""));
+          buffer = "";
+          discarding = false;
+          start = end + 1;
         }
-        if (buffer.length > MAX_RECORD_CHARACTERS)
-          throw new Error("Pi RPC record exceeds the size limit");
       }
       buffer += decoder.decode();
-      // Reject pending requests before waiting on events: an event may itself await a reply.
+      // Even a discarded record must end at LF. EOF never settles a prompt.
+      // Reject before waiting on events: an event may itself await a reply.
       throw new Error(
-        buffer.trim()
+        discarding || buffer.trim()
           ? "Pi RPC disconnected with an incomplete record"
           : "Pi RPC connection closed",
       );

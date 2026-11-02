@@ -7,6 +7,7 @@ import { afterAll, describe, expect, it } from "vitest";
 import type * as acp from "@agentclientprotocol/sdk";
 import { VERSION } from "@earendil-works/pi-coding-agent";
 import { PiRpcConnection, initializeResponse } from "../src/connection.js";
+import { HistoryPager } from "../src/history.js";
 import { supportedThinkingLevels } from "../src/model-capabilities.js";
 import {
   LODY_EXTENSION_METHODS,
@@ -62,6 +63,8 @@ function peer() {
   });
   const commands: Record<string, unknown>[] = [];
   const replies: Record<string, unknown>[] = [];
+  const historyControls = new Map<unknown, Record<string, unknown>>();
+  const history = new HistoryPager();
   const promptReceived = deferred();
   const accepted = deferred();
   const questionAnswered = deferred<Record<string, unknown>>();
@@ -103,6 +106,36 @@ function peer() {
     data?: unknown,
     error?: string,
   ) {
+    const control = historyControls.get(request.id);
+    if (control) {
+      historyControls.delete(request.id);
+      const snapshot = data as {
+        entries: Array<{ id: string; parentId: string | null }>;
+        leafId: string | null;
+      };
+      const byId = new Map(snapshot.entries.map((entry) => [entry.id, entry]));
+      const branch: typeof snapshot.entries = [];
+      for (let id = snapshot.leafId; id;) {
+        const entry = byId.get(id)!;
+        branch.unshift(entry);
+        id = entry.parentId;
+      }
+      emit({
+        type: "extension_ui_request",
+        method: "notify",
+        message:
+          "lody-rpc:" +
+          JSON.stringify({
+            type: "lody_control",
+            id: control.id,
+            data: history.page(
+              { getBranch: () => branch, getLeafId: () => snapshot.leafId },
+              control,
+            ),
+          }),
+      });
+      data = { disposition: "handled" };
+    }
     emit({
       type: "response",
       id: request.id,
@@ -182,10 +215,24 @@ function peer() {
           state.thinkingLevel = String(request.level);
           reply(request);
           break;
-        case "prompt":
+        case "prompt": {
+          if (
+            typeof request.message === "string" &&
+            request.message.startsWith("/lody-steer ")
+          ) {
+            const control = JSON.parse(
+              request.message.slice("/lody-steer ".length),
+            );
+            if (control.op === "history") {
+              historyControls.set(request.id, control);
+              onEntries(request);
+              break;
+            }
+          }
           onPrompt(request);
           promptReceived.resolve();
           break;
+        }
         case "abort":
           onAbort(request);
           break;
@@ -2112,6 +2159,42 @@ describe("native Pi connection", () => {
         content: { type: "text", text: "Done" },
       },
     ]);
+    p.close();
+  });
+
+  it("loads image history larger than one RPC record without dropping image bytes", async () => {
+    const p = peer();
+    const image = "a".repeat(3 * 1024 * 1024);
+    p.setEntries((request) =>
+      p.reply(request, {
+        leafId: "u5",
+        entries: Array.from({ length: 6 }, (_, index) => ({
+          type: "message",
+          id: `u${index}`,
+          parentId: index ? `u${index - 1}` : null,
+          timestamp: "2026-01-01T00:00:00.000Z",
+          message: {
+            role: "user",
+            content: [{ type: "image", data: image, mimeType: "image/png" }],
+          },
+        })),
+      }),
+    );
+    await p.client.initialize({ protocolVersion: 1 });
+    await expect(
+      p.client.loadSession({
+        sessionId: prompt.sessionId,
+        cwd: "/work",
+        mcpServers: [],
+      }),
+    ).resolves.toBeDefined();
+    const images = p.updates.flatMap(({ update }) =>
+      update.sessionUpdate === "user_message_chunk" &&
+      update.content.type === "image"
+        ? [update.content.data]
+        : [],
+    );
+    expect(images).toEqual(Array(6).fill(image));
     p.close();
   });
 
