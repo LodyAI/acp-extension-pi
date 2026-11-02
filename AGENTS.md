@@ -13,7 +13,7 @@ workspace packages or reimplement Pi's executor.
   extension, never the packaged tools extension. This is a supported-feature boundary, not a sandbox against
   arbitrary bash: selected extension code can add tools and no arbitrary
   plugin compatibility is promised.
-- Packaged tools are questionnaire, todo, subagent and ACP-selected stdio MCP
+- Packaged tools are questionnaire, todo, subagent and ACP-selected stdio and streamable HTTP MCP
   tools. Their execute promises own all work. No detached callbacks, hot reload,
   extension-driven session replacement or custom compaction.
 - Only the main agent asks questions. Questionnaire handles one or many questions
@@ -45,6 +45,8 @@ workspace packages or reimplement Pi's executor.
   session/list reads Pi's native files without starting Pi. session/load
   switches like resume, then replays only the current branch from Pi's entries
   with Pi's tool call ids and each todo snapshot at its original position.
+  Fork boundaries are native leaf IDs published after Pi settles. Exact forks copy
+  that branch without locking the running source; untargeted forks require idle.
 - Steering uses native custom-message metadata, never matching text. Emit the Core
   applied notification before later output; Lody owns its application barrier.
 - Keep diagnostics separate from model outcomes. Preserve native error, length
@@ -70,6 +72,9 @@ workspace packages or reimplement Pi's executor.
   MCP result so image blocks remain callable through image(). Configuration secrets stay
   in private temporary files, never native history.
 - Use acp-extension-core contracts. Advertise only implemented capabilities.
+  Activation publishes one command catalog in the session response (Lody capability
+  discovery) and ACP available_commands_update. Pi owns discovered commands; the
+  adapter adds only stats/compact and hides its private steering command.
   No permission modes, arbitrary plugin compatibility, TUI, Plan Mode, runtime
   preset/tools plugins or detached subagent jobs in V1.
 - Tests use synthetic inputs and explicit signals, no real sleeps or commercial

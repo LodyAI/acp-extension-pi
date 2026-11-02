@@ -64,6 +64,7 @@ export async function validateSessionCwd(
 export async function forkPiSession(
   sourcePath: string,
   targetCwd: string,
+  turnId?: string,
 ): Promise<string> {
   if (!isAbsolute(targetCwd)) throw new Error("Pi cwd must be absolute");
   await validateNativeSessionPath(sourcePath);
@@ -75,8 +76,11 @@ export async function forkPiSession(
   const sessionDir =
     process.env.PI_CODING_AGENT_SESSION_DIR ||
     SettingsManager.create(cwd).getSessionDir();
-  const child = SessionManager.forkFrom(sourcePath, cwd, sessionDir);
-  const sessionFile = child.getSessionFile();
+  const sessionFile = turnId
+    ? SessionManager.open(sourcePath, sessionDir, cwd).createBranchedSession(
+        turnId,
+      )
+    : SessionManager.forkFrom(sourcePath, cwd, sessionDir).getSessionFile();
   if (!sessionFile)
     throw new Error("Native Pi fork did not create a session file");
   return sessionFile;

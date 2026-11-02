@@ -1,6 +1,6 @@
 # Pi ACP adapter
 
-A Lody-owned ACP adapter for the pinned official Pi CLI (1.3.0).
+A Lody-owned ACP adapter for the pinned official Pi CLI (1.4.0).
 
 ```text
 Lody → ACP Adapter → official Pi CLI --mode rpc
@@ -26,7 +26,7 @@ Authenticate/configure models through Pi on the execution machine. ACP
 configuration also exposes model and thinking selection. stdout is ACP;
 stderr contains diagnostics.
 
-`LODY_PI_PATH` can select another Pi executable. It must support the Pi 1.3
+`LODY_PI_PATH` can select another Pi executable. It must support the Pi 1.4
 RPC contract and explicit `builtin:codemode` loading, like the bundled runtime.
 
 Extensions are opt-in only. The adapter disables ambient and project
@@ -64,9 +64,13 @@ runtime is still required before this reaches Lody's installed Pi provider.
   history. Compaction summaries and other branches are not replayed. A missing
   session file fails resume/load instead of starting an empty session.
 - Acknowledged steering using acp-extension-core identity metadata.
+- Slash-command discovery on new/resume/load/fork: `/stats`, `/compact`, and
+  Pi's loaded extension, prompt-template and skill commands. The private steering
+  command is hidden. Commands keep Pi's native execution semantics; terminal-only
+  UI and detached extension work are not supported.
 - Per-response token usage by model (including compaction summaries and
   subagents), native context snapshots, automatic compaction activity and /compact.
-- ACP-selected stdio MCP tools with text/image results and cancellation.
+- ACP-selected stdio and streamable HTTP MCP tools with text/image results and cancellation. Legacy SSE and ACP transports are not supported.
 - Questionnaire: one or more questions in Lody's existing question card.
 - Todo: list/add/toggle/clear through Lody's existing checklist.
 - Subagent: native Lody task lifecycle, list, output and individual cancellation.
@@ -93,8 +97,10 @@ Fork uses Pi's native file-fork mechanism for existing persisted history, create
 a new native ID/file and preserves the source file and active runtime. It copies
 native history rather than sending history as a prompt. Each session has its own
 RPC process and private workspace/MCP configuration; parent, child and sibling
-sessions remain independently addressable on the connection. A fork of a live
-source requires it to be idle. Connection close cleans up all owned runtimes;
+sessions remain independently addressable on the connection. Core `forkAtTurn`
+selects a native branch through the `turnId` emitted after Pi settles a prompt.
+An exact boundary can be forked while the source continues running; an untargeted
+fork still requires the source to be idle. Connection close cleans up all owned runtimes;
 an unexpected Pi exit still fails the entire connection. Empty, never-persisted
 sessions are outside the recovery/fork contract.
 
@@ -218,7 +224,8 @@ in the model request, per-response usage, steering, provider-error recovery and
 explicit child model selection and tool isolation.
 The same script accepts an installed dist/index.js path.
 
-Upgrade decision and verification limits: [Pi 1.3 runtime note](.agents/notes/implemented/feature/2026-10-16-pi-1.3-runtime.md).
+Upgrade decision and verification limits: [Pi 1.4 runtime note](.agents/notes/implemented/feature/2026-10-28-pi-1.4-runtime.md).
+The previous runtime contract is recorded in the [Pi 1.3 runtime note](.agents/notes/implemented/feature/2026-10-16-pi-1.3-runtime.md).
 
 The separate Electron acceptance in that note covers one real provider, a locally
 served checksummed managed runtime, and a host-side image attachment submission

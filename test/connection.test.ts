@@ -5,8 +5,10 @@ import { tmpdir } from "node:os";
 import { join, resolve, normalize } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
 import type * as acp from "@agentclientprotocol/sdk";
+import { VERSION } from "@earendil-works/pi-coding-agent";
 import { PiRpcConnection, initializeResponse } from "../src/connection.js";
 import { HistoryPager } from "../src/history.js";
+import { supportedThinkingLevels } from "../src/model-capabilities.js";
 import {
   LODY_EXTENSION_METHODS,
   LODY_SUBAGENT_EVENT_METHOD,
@@ -39,6 +41,8 @@ const model = {
   provider: "fixture",
   id: "one",
   name: "Fixture",
+  reasoning: true,
+  thinkingLevelMap: { minimal: null, low: null, medium: null, max: null },
 };
 const usage = {
   input: 10,
@@ -152,9 +156,13 @@ function peer() {
     reply(request, state.model);
   };
   let onModels = (request: Record<string, unknown>) =>
-    reply(request, { models: [model, { ...model, id: "two" }] });
+    reply(request, {
+      models: [model, { ...model, id: "two", reasoning: false }],
+    });
   let onEntries = (request: Record<string, unknown>) =>
     reply(request, { entries: [], leafId: null });
+  let onCommands = (request: Record<string, unknown>) =>
+    reply(request, { commands: [] });
   const writable = new WritableStream<Uint8Array>({
     write(bytes) {
       const request: Record<string, unknown> = JSON.parse(
@@ -199,6 +207,9 @@ function peer() {
           break;
         case "get_entries":
           onEntries(request);
+          break;
+        case "get_commands":
+          onCommands(request);
           break;
         case "set_thinking_level":
           state.thinkingLevel = String(request.level);
@@ -294,6 +305,9 @@ function peer() {
     setEntries(handler: typeof onEntries) {
       onEntries = handler;
     },
+    setCommands(handler: typeof onCommands) {
+      onCommands = handler;
+    },
     get client() {
       return (client ??= new PiRpcConnection(stream, host));
     },
@@ -353,6 +367,101 @@ const lodyEvent = (payload: Record<string, unknown>) => ({
 });
 
 describe("native Pi connection", () => {
+  it("publishes the current command catalog on new, resume and load", async () => {
+    const p = peer();
+    let commands = [
+      {
+        name: "compact",
+        description: "Shadowed extension",
+        source: "extension",
+      },
+      { name: "lody-steer", source: "extension" },
+      { name: "review", description: "Review changes", source: "prompt" },
+      { name: "skill:testing", source: "skill" },
+      { name: "handled", description: "Local action", source: "extension" },
+    ];
+    p.setCommands((request) => p.reply(request, { commands }));
+    const created = await start(p);
+    const catalogs = () =>
+      p.updates.flatMap(({ sessionId, update }) => {
+        expect(sessionId).toBe(nativeSession);
+        return update.sessionUpdate === "available_commands_update"
+          ? [update.availableCommands]
+          : [];
+      });
+    expect(catalogs()).toEqual([
+      [
+        { name: "stats", description: "Show session statistics" },
+        { name: "compact", description: "Compact the session context" },
+        { name: "review", description: "Review changes" },
+        { name: "skill:testing", description: "" },
+        { name: "handled", description: "Local action" },
+      ],
+    ]);
+    expect(created).toMatchObject({ availableCommands: catalogs()[0] });
+    commands = [];
+    for (const method of ["resumeSession", "loadSession"] as const) {
+      p.updates.length = 0;
+      const response = await p.client[method]({
+        sessionId: nativeSession,
+        cwd: "/work",
+        mcpServers: [],
+      });
+      expect(catalogs()).toEqual([
+        [
+          { name: "stats", description: "Show session statistics" },
+          { name: "compact", description: "Compact the session context" },
+        ],
+      ]);
+      expect(response).toMatchObject({ availableCommands: catalogs()[0] });
+    }
+    p.close();
+  });
+
+  it.each(["error", "malformed"])(
+    "does not hide a %s command catalog failure",
+    async (failure) => {
+      const p = peer();
+      p.setCommands((request) =>
+        failure === "error"
+          ? p.reply(request, undefined, "command discovery failed")
+          : p.reply(request, { commands: [{ name: 42 }] }),
+      );
+      await expect(start(p)).rejects.toThrow();
+      expect(
+        p.updates.some(
+          ({ update }) => update.sessionUpdate === "available_commands_update",
+        ),
+      ).toBe(false);
+      p.close();
+    },
+  );
+
+  it("publishes the settled native leaf as the fork boundary before completing the prompt", async () => {
+    const p = peer();
+    await start(p);
+    p.setEntries((request) =>
+      p.reply(request, undefined, "must not read the transcript"),
+    );
+    p.setPrompt((request) => {
+      p.reply(request, { disposition: "started" });
+      p.emit({ type: "agent_start" });
+      p.emit(text("completed response"));
+      p.emit(lodyEvent({ type: "lody_turn_boundary", turnId: "settled-leaf" }));
+      p.finish();
+    });
+    expect(await p.client.prompt(prompt)).toEqual({ stopReason: "end_turn" });
+    expect(p.updates.map(({ update }) => update)).toContainEqual({
+      sessionUpdate: "agent_message_chunk",
+      content: { type: "text", text: "" },
+      _meta: { lody: { turnId: "settled-leaf" } },
+    });
+    expect(initializeResponse().agentCapabilities?._meta).toMatchObject({
+      lody: { forkAtTurn: { version: 1 } },
+    });
+    p.close();
+  });
+
   it("completes handled input without a model event and admits the next prompt", async () => {
     const p = peer();
     await start(p);
@@ -1311,6 +1420,7 @@ describe("native Pi connection", () => {
     const history = p.updates.filter(
       (n) =>
         n.update.sessionUpdate !== "usage_update" &&
+        n.update.sessionUpdate !== "available_commands_update" &&
         !n.update._meta?.lody?.activity &&
         n.update.sessionUpdate !== "config_option_update",
     );
@@ -1595,6 +1705,246 @@ describe("native Pi connection", () => {
     p.close();
   });
 
+  it("switches to sessionConfig.modelId before applying its thinking level", async () => {
+    const p = peer();
+    await p.client.initialize({ protocolVersion: 1 });
+    // The previous model supports only "off"; "high" belongs to the requested one.
+    p.state.model = { ...model, id: "two", reasoning: false };
+    await p.client.newSession({
+      cwd: "/work",
+      mcpServers: [],
+      _meta: {
+        lody: {
+          sessionConfig: {
+            version: 1,
+            modelId: "fixture/one",
+            configOptionValues: { thinking: "high" },
+          },
+        },
+      },
+    });
+    const configured = p.commands.filter(
+      (command) =>
+        command.type === "set_model" || command.type === "set_thinking_level",
+    );
+    expect(configured).toMatchObject([
+      { type: "set_model", provider: "fixture", modelId: "one" },
+      { type: "set_thinking_level", level: "high" },
+    ]);
+    expect(p.state.thinkingLevel).toBe("high");
+    p.close();
+  });
+
+  it("prefers modelId over a conflicting model option", async () => {
+    const p = peer();
+    await p.client.initialize({ protocolVersion: 1 });
+    await p.client.newSession({
+      cwd: "/work",
+      mcpServers: [],
+      _meta: {
+        lody: {
+          sessionConfig: {
+            version: 1,
+            modelId: "fixture/one",
+            configOptionValues: { model: "fixture/two" },
+          },
+        },
+      },
+    });
+    expect(
+      p.commands.find((command) => command.type === "set_model"),
+    ).toMatchObject({ provider: "fixture", modelId: "one" });
+    expect(p.state.model.id).toBe("one");
+    p.close();
+  });
+
+  it("falls back to the model option when modelId is absent", async () => {
+    const p = peer();
+    await p.client.initialize({ protocolVersion: 1 });
+    await p.client.newSession({
+      cwd: "/work",
+      mcpServers: [],
+      _meta: {
+        lody: {
+          sessionConfig: {
+            version: 1,
+            configOptionValues: { model: "fixture/one" },
+          },
+        },
+      },
+    });
+    expect(
+      p.commands.find((command) => command.type === "set_model"),
+    ).toMatchObject({ provider: "fixture", modelId: "one" });
+    expect(p.state.model.id).toBe("one");
+    p.close();
+  });
+
+  it("does not let a non-string model option mask modelId", async () => {
+    const p = peer();
+    await p.client.initialize({ protocolVersion: 1 });
+    await p.client.newSession({
+      cwd: "/work",
+      mcpServers: [],
+      _meta: {
+        lody: {
+          sessionConfig: {
+            version: 1,
+            modelId: "fixture/one",
+            configOptionValues: { model: false, thinking: "high" },
+          },
+        },
+      },
+    });
+    expect(
+      p.commands.find((command) => command.type === "set_model"),
+    ).toMatchObject({ provider: "fixture", modelId: "one" });
+    expect(p.state.model.id).toBe("one");
+    expect(p.state.thinkingLevel).toBe("high");
+    p.close();
+  });
+
+  it("keeps the thinking level when modelId is malformed", async () => {
+    const p = peer();
+    await p.client.initialize({ protocolVersion: 1 });
+    await p.client.newSession({
+      cwd: "/work",
+      mcpServers: [],
+      _meta: {
+        lody: {
+          sessionConfig: {
+            version: 1,
+            modelId: 42,
+            configOptionValues: { thinking: "high" },
+          },
+        },
+      },
+    });
+    expect(p.commands.some((command) => command.type === "set_model")).toBe(
+      false,
+    );
+    expect(p.state.thinkingLevel).toBe("high");
+    p.close();
+  });
+
+  it("keeps Pi's own model when the startup config carries no model", async () => {
+    const p = peer();
+    await p.client.initialize({ protocolVersion: 1 });
+    await p.client.newSession({
+      cwd: "/work",
+      mcpServers: [],
+      _meta: {
+        lody: {
+          sessionConfig: {
+            version: 1,
+            configOptionValues: { thinking: "high" },
+          },
+        },
+      },
+    });
+    expect(p.commands.some((command) => command.type === "set_model")).toBe(
+      false,
+    );
+    expect(p.state.model.id).toBe("one");
+    expect(p.state.thinkingLevel).toBe("high");
+    p.close();
+  });
+
+  it("declares every model's thinking ladder in each session response", async () => {
+    const p = peer();
+    p.setModels((request) =>
+      p.reply(request, {
+        models: [
+          model,
+          { provider: "fixture", id: "off", name: "Off", reasoning: false },
+          {
+            provider: "fixture",
+            id: "ext",
+            name: "Ext",
+            reasoning: true,
+            thinkingLevelMap: { medium: null, xhigh: "xhigh", max: null },
+          },
+        ],
+      }),
+    );
+    const expected = {
+      lody: {
+        modelCapabilities: {
+          version: 1,
+          models: {
+            "fixture/one": { effortValues: ["off", "high"] },
+            "fixture/off": { effortValues: ["off"] },
+            "fixture/ext": {
+              effortValues: ["off", "minimal", "low", "high", "xhigh"],
+            },
+          },
+        },
+      },
+    };
+    const created = await start(p);
+    expect(created._meta).toEqual(expected);
+    const resumed = await p.client.resumeSession({
+      sessionId: prompt.sessionId,
+      cwd: "/work",
+      mcpServers: [],
+    });
+    expect(resumed._meta).toEqual(expected);
+    const loaded = await p.client.loadSession({
+      sessionId: prompt.sessionId,
+      cwd: "/work",
+      mcpServers: [],
+    });
+    expect(loaded._meta).toEqual(expected);
+    p.close();
+  });
+
+  it("omits the declaration when Pi omits a model's capability fields", async () => {
+    const p = peer();
+    p.setModels((request) =>
+      p.reply(request, {
+        models: [{ provider: "fixture", id: "one", name: "Fixture" }],
+      }),
+    );
+    const created = await start(p);
+    expect(created._meta).toBeUndefined();
+    const resumed = await p.client.resumeSession({
+      sessionId: prompt.sessionId,
+      cwd: "/work",
+      mcpServers: [],
+    });
+    expect(resumed._meta).toBeUndefined();
+    const loaded = await p.client.loadSession({
+      sessionId: prompt.sessionId,
+      cwd: "/work",
+      mcpServers: [],
+    });
+    expect(loaded._meta).toBeUndefined();
+    p.close();
+  });
+
+  it("mirrors Pi's thinking-level rules", () => {
+    expect(supportedThinkingLevels({ reasoning: false })).toEqual(["off"]);
+    expect(supportedThinkingLevels({ reasoning: true })).toEqual([
+      "off",
+      "minimal",
+      "low",
+      "medium",
+      "high",
+    ]);
+    expect(
+      supportedThinkingLevels({
+        reasoning: true,
+        thinkingLevelMap: { medium: null, xhigh: "xhigh", max: null },
+      }),
+    ).toEqual(["off", "minimal", "low", "high", "xhigh"]);
+    expect(
+      supportedThinkingLevels({
+        reasoning: true,
+        thinkingLevelMap: { max: "max" },
+      }),
+    ).toEqual(["off", "minimal", "low", "medium", "high", "max"]);
+  });
+
   it("replaces workspace roots on each activation and rejects invalid attach before any mutation", async () => {
     const p = peer();
     const workspaces: unknown[] = [];
@@ -1758,7 +2108,13 @@ describe("native Pi connection", () => {
       sessionPath: prompt.sessionId,
     });
     const plan = [{ content: "Ship", priority: "medium", status: "pending" }];
-    expect(p.updates.map((u) => u.update)).toEqual([
+    expect(
+      p.updates
+        .map((u) => u.update)
+        .filter(
+          (update) => update.sessionUpdate !== "available_commands_update",
+        ),
+    ).toEqual([
       {
         sessionUpdate: "user_message_chunk",
         content: { type: "text", text: "hello" },
@@ -2046,6 +2402,11 @@ describe("native Pi connection", () => {
     expect(resumed?._meta?.lody?.usageScopeId).not.toBe(firstScope);
     expect(resumed?.modelUsage?.["fixture/one"]?.inputTokens).toBe(10);
     p.close();
+  });
+
+  it("reports the Pi release it actually runs", () => {
+    // A pin bump that forgets PI_RPC_VERSION would tell every client the wrong version.
+    expect(initializeResponse().agentInfo?.version).toBe(VERSION);
   });
 
   it("keeps stats for context occupancy only, never replaying resumed history as usage", async () => {

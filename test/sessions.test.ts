@@ -179,6 +179,34 @@ describe("native Pi session identity and fork", () => {
     );
   });
 
+  it("forks the selected native branch and leaves later source messages out", async () => {
+    const { target, file, manager } = fixture();
+    const turnId = manager.getLeafId()!;
+    const prefix = manager.getBranch();
+    manager.appendMessage({
+      role: "user",
+      content: "later source input",
+      timestamp: 3,
+    });
+    const before = readFileSync(file);
+    const childPath = await forkPiSession(file, target, turnId);
+    const child = SessionManager.open(childPath);
+    expect(child.getBranch()).toEqual(prefix);
+    expect(child.getHeader()).toMatchObject({
+      cwd: target,
+      parentSession: file,
+    });
+    child.appendMessage({
+      role: "user",
+      content: "child continuation",
+      timestamp: 4,
+    });
+    expect(readFileSync(file)).toEqual(before);
+    await expect(
+      forkPiSession(file, target, "missing-entry"),
+    ).rejects.toThrow();
+  });
+
   it("rejects invalid paths and headers before creating a fork", async () => {
     const { target } = fixture();
     const invalid = join(directory!, "invalid.jsonl");

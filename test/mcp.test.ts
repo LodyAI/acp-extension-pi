@@ -15,7 +15,22 @@ vi.mock("@modelcontextprotocol/sdk/client/index.js", () => ({
   },
 }));
 vi.mock("@modelcontextprotocol/sdk/client/stdio.js", () => ({
-  StdioClientTransport: class {},
+  StdioClientTransport: class {
+    constructor(public options: unknown) {}
+  },
+}));
+const httpTransports = vi.hoisted(
+  () => [] as { url: string; headers: Record<string, string> }[],
+);
+vi.mock("@modelcontextprotocol/sdk/client/streamableHttp.js", () => ({
+  StreamableHTTPClientTransport: class {
+    constructor(url: URL, opts?: { requestInit?: RequestInit }) {
+      httpTransports.push({
+        url: url.toString(),
+        headers: (opts?.requestInit?.headers ?? {}) as Record<string, string>,
+      });
+    }
+  },
 }));
 const originalConfig = process.env[MCP_CONFIG_ENV];
 let directory: string | undefined;
@@ -30,19 +45,25 @@ async function activation(
   servers: string[],
   active: string[],
   exposure = "direct",
+  http?: {
+    name: string;
+    url: string;
+    headers: { name: string; value: string }[];
+  },
 ) {
   directory ??= mkdtempSync(join(tmpdir(), "pi-mcp-test-"));
   const config = join(directory, "servers.json");
   writeFileSync(
     config,
-    JSON.stringify(
-      servers.map((name) => ({
+    JSON.stringify([
+      ...servers.map((name) => ({
         name,
         command: "synthetic",
         args: [],
         env: [],
       })),
-    ),
+      ...(http ? [{ ...http, type: "http" }] : []),
+    ]),
   );
   process.env[MCP_CONFIG_ENV] = config;
   const tools: any[] = [];
@@ -89,5 +110,22 @@ describe("ACP MCP activation loadout", () => {
   it("does not add any tools for an empty selection", async () => {
     const update = await activation([], ["bash"]);
     expect(update).toHaveBeenCalledWith(["bash"]);
+  });
+  it("connects http servers through the streamable transport and forwards headers", async () => {
+    const update = await activation([], ["read"], "direct", {
+      name: "remote",
+      url: "https://mcp.example.com/endpoint?token=redacted",
+      headers: [
+        { name: "Authorization", value: "Bearer secret" },
+        { name: "X-Tenant", value: "acme" },
+      ],
+    });
+    expect(update).toHaveBeenCalledWith(["read", "mcp_remote_read"]);
+    expect(httpTransports).toEqual([
+      {
+        url: "https://mcp.example.com/endpoint?token=redacted",
+        headers: { Authorization: "Bearer secret", "X-Tenant": "acme" },
+      },
+    ]);
   });
 });

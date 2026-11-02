@@ -26,6 +26,10 @@ import { validateSessionCwd } from "./sessions.js";
 import { PI_RPC_VERSION } from "./version.js";
 import { QUESTION_PREFIX, questionsSchema } from "./builtin-tools.js";
 import { BlockDeltaSequencer, type BlockDelta } from "./block-deltas.js";
+import {
+  buildModelCapabilitiesMeta,
+  modelCapabilitySchema,
+} from "./model-capabilities.js";
 
 const modelSchema = z.object({
   provider: z.string(),
@@ -65,10 +69,12 @@ const statsSchema = z.object({
 const startupConfigSchema = z.object({
   lody: z.object({
     sessionConfig: z.object({
-      configOptionValues: z.record(
-        z.string(),
-        z.union([z.string(), z.boolean()]),
-      ),
+      // A malformed field must not discard the rest of the startup config.
+      modelId: z.string().min(1).optional().catch(undefined),
+      configOptionValues: z
+        .record(z.string(), z.union([z.string(), z.boolean()]))
+        .optional()
+        .catch(undefined),
     }),
   }),
 });
@@ -324,14 +330,11 @@ export class PiRpcConnection implements AgentConnection {
     this.open(request, false);
 
   loadSession: AgentConnection["loadSession"] = async (request) => {
-    const { configOptions } = await this.open(request, true);
-    return { configOptions };
+    const { sessionId: _, ...response } = await this.open(request, true);
+    return response;
   };
 
-  private async open(
-    request: acp.ResumeSessionRequest,
-    replay: boolean,
-  ): Promise<acp.NewSessionResponse> {
+  private async open(request: acp.ResumeSessionRequest, replay: boolean) {
     const workspace = validateWorkspace(request);
     // Invalid attach requests must not retire the current identity, roots or MCP clients.
     await validateSessionCwd(request.sessionId, workspace.cwd);
@@ -358,15 +361,22 @@ export class PiRpcConnection implements AgentConnection {
   private async prepare(
     meta: unknown,
     replay = false,
-  ): Promise<acp.NewSessionResponse> {
+  ): Promise<
+    acp.NewSessionResponse & { availableCommands: acp.AvailableCommand[] }
+  > {
     const config = startupConfigSchema.safeParse(meta);
     if (config.success) {
-      const values = config.data.lody.sessionConfig.configOptionValues;
-      // Model first: the supported thinking ladder belongs to the selected model.
-      for (const id of ["model", "thinking"]) {
-        const value = values[id];
-        if (typeof value === "string") await this.setOption(id, value);
-      }
+      const { modelId, configOptionValues } = config.data.lody.sessionConfig;
+      const values = configOptionValues ?? {};
+      // `modelId` wins; the option is a fallback, so guard its type first.
+      const model =
+        modelId ??
+        (typeof values.model === "string" ? values.model : undefined);
+      // Model first: the thinking ladder belongs to the selected model.
+      if (model !== undefined) await this.setOption("model", model);
+      const thinking = values.thinking;
+      if (typeof thinking === "string")
+        await this.setOption("thinking", thinking);
     }
     const state = await this.readState();
     if (!state.sessionFile)
@@ -383,9 +393,48 @@ export class PiRpcConnection implements AgentConnection {
       await this.update({ sessionUpdate: "plan", entries: this.pendingPlan });
       this.pendingPlan = undefined;
     }
-    const configOptions = await this.configOptions();
+    const { configOptions, capabilityMeta } = await this.readConfig();
+    const availableCommands = await this.readCommands();
+    await this.update({
+      sessionUpdate: "available_commands_update",
+      availableCommands,
+    });
     await this.reportUsage();
-    return { sessionId: this.sessionId, configOptions };
+    return {
+      sessionId: this.sessionId,
+      configOptions,
+      _meta: capabilityMeta,
+      availableCommands,
+    };
+  }
+
+  private async readCommands(): Promise<acp.AvailableCommand[]> {
+    const { commands } = z
+      .object({
+        commands: z.array(
+          z.object({
+            name: z.string().min(1),
+            description: z.string().optional(),
+          }),
+        ),
+      })
+      .parse(await this.rpc.request("get_commands"));
+    const available = new Map<string, acp.AvailableCommand>([
+      ["stats", { name: "stats", description: "Show session statistics" }],
+      [
+        "compact",
+        { name: "compact", description: "Compact the session context" },
+      ],
+    ]);
+    for (const command of commands) {
+      if (command.name === this.steerCommand || available.has(command.name))
+        continue;
+      available.set(command.name, {
+        name: command.name,
+        description: command.description ?? "",
+      });
+    }
+    return [...available.values()];
   }
 
   /** Replays the native branch Pi will continue from, using Pi's own tool call ids. */
@@ -473,9 +522,12 @@ export class PiRpcConnection implements AgentConnection {
     }
   }
 
-  private async configOptions(
+  private async readConfig(
     observedState?: z.infer<typeof stateSchema>,
-  ): Promise<acp.SessionConfigOption[]> {
+  ): Promise<{
+    configOptions: acp.SessionConfigOption[];
+    capabilityMeta: Record<string, unknown> | undefined;
+  }> {
     const [rawState, rawModels, rawLevels] = await Promise.all([
       observedState ?? this.readState(),
       this.rpc.request("get_available_models"),
@@ -490,35 +542,44 @@ export class PiRpcConnection implements AgentConnection {
     const levels = z
       .object({ levels: z.array(z.string()) })
       .parse(rawLevels).levels;
+    // Omit the whole declaration when Pi's model shape is unexpected.
+    const capabilityModels = z
+      .object({ models: z.array(modelCapabilitySchema) })
+      .safeParse(rawModels);
     if (!state.model || models.length === 0)
       throw new Error(
         "Pi has no configured model. Run pi /login on this machine or add provider API keys to the agent environment.",
       );
-    return [
-      ...(state.model
-        ? [
-            {
-              id: "model",
-              name: "Model",
-              category: "model",
-              type: "select" as const,
-              currentValue: `${state.model.provider}/${state.model.id}`,
-              options: models.map((model) => ({
-                value: `${model.provider}/${model.id}`,
-                name: `${model.name} (${model.provider})`,
-              })),
-            },
-          ]
-        : []),
-      {
-        id: "thinking",
-        name: "Thinking",
-        category: "thought_level",
-        type: "select",
-        currentValue: state.thinkingLevel,
-        options: levels.map((value) => ({ value, name: value })),
-      },
-    ];
+    return {
+      configOptions: [
+        ...(state.model
+          ? [
+              {
+                id: "model",
+                name: "Model",
+                category: "model",
+                type: "select" as const,
+                currentValue: `${state.model.provider}/${state.model.id}`,
+                options: models.map((model) => ({
+                  value: `${model.provider}/${model.id}`,
+                  name: `${model.name} (${model.provider})`,
+                })),
+              },
+            ]
+          : []),
+        {
+          id: "thinking",
+          name: "Thinking",
+          category: "thought_level",
+          type: "select",
+          currentValue: state.thinkingLevel,
+          options: levels.map((value) => ({ value, name: value })),
+        },
+      ],
+      capabilityMeta: capabilityModels.success
+        ? buildModelCapabilitiesMeta(capabilityModels.data.models)
+        : undefined,
+    };
   }
 
   private async setOption(id: string, value: string): Promise<void> {
@@ -555,7 +616,7 @@ export class PiRpcConnection implements AgentConnection {
       if (typeof request.value !== "string")
         throw new Error("Pi configuration requires a select value");
       await this.setOption(request.configId, request.value);
-      const configOptions = await this.configOptions();
+      const { configOptions } = await this.readConfig();
       await this.reportUsage();
       return { configOptions };
     });
@@ -678,7 +739,7 @@ export class PiRpcConnection implements AgentConnection {
     const state = await this.readState();
     let configOptions: acp.SessionConfigOption[];
     try {
-      configOptions = await this.configOptions(state);
+      configOptions = (await this.readConfig(state)).configOptions;
     } catch (error) {
       this.rpc.assertOpen();
       process.stderr.write(
@@ -846,6 +907,20 @@ export class PiRpcConnection implements AgentConnection {
         .object({ type: z.string() })
         .passthrough()
         .parse(JSON.parse(event.message.slice("lody-rpc:".length)));
+      if (payload.type === "lody_turn_boundary") {
+        const { turnId } = z
+          .object({ turnId: z.string().min(1) })
+          .parse(payload);
+        if (this.active) {
+          await this.emitDeltas(this.blockDeltas.close());
+          await this.update({
+            sessionUpdate: "agent_message_chunk",
+            content: { type: "text", text: "" },
+            _meta: { lody: { turnId } },
+          });
+        }
+        return;
+      }
       if (payload.type === "lody_control") {
         const response = this.controls.get(String(payload.id));
         if (payload.error) response?.reject(new Error(String(payload.error)));
@@ -1698,6 +1773,7 @@ export function initializeResponse(): acp.InitializeResponse {
       _meta: {
         lody: {
           usage: { version: 1 },
+          forkAtTurn: { version: 1 },
           subagentEvents: { version: 1 },
           compaction: { version: 1 },
           subagents: {
@@ -1716,6 +1792,7 @@ export function initializeResponse(): acp.InitializeResponse {
         },
       },
       promptCapabilities: { image: true, embeddedContext: true },
+      mcpCapabilities: { http: true },
       loadSession: true,
       sessionCapabilities: {
         resume: {},

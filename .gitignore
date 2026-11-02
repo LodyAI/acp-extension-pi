@@ -3,3 +3,4 @@ dist/
 *.tgz
 native/build/
 native/*.node
+.backups/

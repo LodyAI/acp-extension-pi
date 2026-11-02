@@ -6,6 +6,7 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import {
   CallToolResultSchema,
   TextContentSchema,
@@ -22,6 +23,26 @@ const outputSchema = z.toJSONSchema(
 
 export const MCP_CONFIG_ENV = "LODY_PI_MCP_CONFIG";
 type StdioServer = Extract<McpServer, { command: string }>;
+type HttpServer = Extract<McpServer, { url: string }>;
+type SelectedServer = StdioServer | HttpServer;
+
+function createTransport(server: SelectedServer) {
+  if ("url" in server)
+    return new StreamableHTTPClientTransport(new URL(server.url), {
+      requestInit: {
+        headers: Object.fromEntries(
+          server.headers.map(({ name, value }) => [name, value]),
+        ),
+      },
+    });
+  return new StdioClientTransport({
+    command: server.command,
+    args: server.args,
+    env: Object.fromEntries(server.env.map(({ name, value }) => [name, value])),
+    cwd: process.cwd(),
+    stderr: "ignore",
+  });
+}
 
 /** Loaded in Pi: native tools own calls and cancellation; the SDK owns transport. */
 export async function registerMcpTools(pi: ExtensionAPI): Promise<void> {
@@ -29,7 +50,7 @@ export async function registerMcpTools(pi: ExtensionAPI): Promise<void> {
   if (!configPath) throw new Error("Missing Lody Pi runtime configuration");
   const servers = JSON.parse(
     await readFile(configPath, "utf8"),
-  ) as StdioServer[];
+  ) as SelectedServer[];
   const clients: Client[] = [];
   const tools = new Set<string>();
   const close = async () => {
@@ -69,15 +90,7 @@ export async function registerMcpTools(pi: ExtensionAPI): Promise<void> {
     for (const server of servers) {
       const client = new Client({ name: "lody-pi", version: "0.1.0" });
       clients.push(client);
-      const transport = new StdioClientTransport({
-        command: server.command,
-        args: server.args,
-        env: Object.fromEntries(
-          server.env.map(({ name, value }) => [name, value]),
-        ),
-        cwd: process.cwd(),
-        stderr: "ignore",
-      });
+      const transport = createTransport(server);
       await client.connect(transport, { timeout: 30_000 });
       let cursor: string | undefined;
       do {
