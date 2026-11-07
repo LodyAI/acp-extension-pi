@@ -81,7 +81,9 @@ it("applies client instructions to the native root prompt without leaking them i
     expect(replaced).toContain("Replacement instructions");
     expect(replaced).not.toContain("Native instructions");
     expect(replaced).not.toContain("Client instruction");
-    expect(replaced).toContain(directory);
+    expect(replaced).toContain(
+      JSON.stringify({ cwd: directory, additionalDirectories: [] }),
+    );
   } finally {
     if (previous === undefined) delete process.env[WORKSPACE_CONFIG_ENV];
     else process.env[WORKSPACE_CONFIG_ENV] = previous;
