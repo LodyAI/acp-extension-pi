@@ -265,7 +265,7 @@ export function serve(stream: Stream, piArgs: string[] = []) {
               })
               .catch(close);
           },
-          question: (request) => client.unstable_createElicitation(request),
+          question: (request) => client.createElicitation(request),
         },
         (error) => diagnostics.decorateError(error),
       );

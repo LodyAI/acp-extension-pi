@@ -1801,6 +1801,7 @@ export function initializeResponse(): acp.InitializeResponse {
       mcpCapabilities: { http: true },
       loadSession: true,
       sessionCapabilities: {
+        systemPrompt: { mode: { override: {} } },
         resume: {},
         list: {},
         fork: {},

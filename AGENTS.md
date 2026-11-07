@@ -85,3 +85,5 @@ workspace packages or reimplement Pi's executor.
 Implementation changes use a Draft PR. Before committing run pnpm check,
 pnpm build and pnpm smoke. Verify installed tarball behavior for packaging changes.
 Remove replaced production paths and their implementation-only tests together.
+
+- Standard ACP `systemPrompt` belongs to the activation workspace file and is applied only by the main agent hook. Keep it out of workspace context and subagent inheritance; each activation replaces the value.

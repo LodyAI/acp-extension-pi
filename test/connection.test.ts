@@ -1898,6 +1898,57 @@ describe("native Pi connection", () => {
     ).toEqual(["off", "minimal", "low", "medium", "high", "max"]);
   });
 
+  it("carries standard system prompts through ACP and replaces them on reattachment", async () => {
+    const p = peer();
+    const workspaces: unknown[] = [];
+    p.host.configureWorkspace = async (value) => {
+      workspaces.push(value);
+    };
+    const first = {
+      mode: "append" as const,
+      content: [{ type: "text" as const, text: "First" }],
+    };
+    const second = {
+      mode: "override" as const,
+      content: [{ type: "text" as const, text: "Second" }],
+    };
+    await p.client.newSession({
+      cwd: "/work",
+      mcpServers: [],
+      systemPrompt: first,
+    });
+    await p.client.resumeSession({
+      sessionId: nativeSession,
+      cwd: "/work",
+      systemPrompt: second,
+    });
+    expect(workspaces).toEqual([
+      {
+        cwd: normalize("/work"),
+        additionalDirectories: [],
+        systemPrompt: first,
+      },
+      {
+        cwd: normalize("/work"),
+        additionalDirectories: [],
+        systemPrompt: second,
+      },
+    ]);
+    const before = p.commands.length;
+    await expect(
+      p.client.resumeSession({
+        sessionId: nativeSession,
+        cwd: "/work",
+        systemPrompt: {
+          mode: "unsupported",
+          content: [{ type: "text", text: "Bad" }],
+        },
+      }),
+    ).rejects.toMatchObject({ code: -32602 });
+    expect(p.commands.length).toBe(before);
+    p.close();
+  });
+
   it("replaces workspace roots on each activation and rejects invalid attach before any mutation", async () => {
     const p = peer();
     const workspaces: unknown[] = [];

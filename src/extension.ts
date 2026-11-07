@@ -19,10 +19,18 @@ export default async function lodyExtension(pi: ExtensionAPI): Promise<void> {
     ctx.ui.notify("lody-rpc:" + JSON.stringify(event), "info");
   // A private invocation per loaded runtime avoids sharing the public command namespace.
   const command = `lody-steer-${randomUUID()}`;
-  const workspace = readWorkspace();
-  pi.on("before_agent_start", (event) => ({
-    systemPrompt: `${event.systemPrompt}\n\n${workspaceContext(workspace)}`,
-  }));
+  pi.on("before_agent_start", (event) => {
+    const workspace = readWorkspace();
+    const instructions = workspace.systemPrompt;
+    const text = instructions?.content.map((block) => block.text).join("\n\n");
+    const prompt =
+      instructions?.mode === "override"
+        ? text!
+        : [event.systemPrompt, text]
+            .filter((part) => part !== undefined)
+            .join("\n\n");
+    return { systemPrompt: `${prompt}\n\n${workspaceContext(workspace)}` };
+  });
   registerBuiltinTools(pi, emit);
   const subagent = registerSubagents(pi, emit);
   pi.on("session_before_tree", (_event, ctx) => {
