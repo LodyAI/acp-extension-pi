@@ -37,3 +37,56 @@ it("adds a child workspace snapshot while preserving native user prompt and regi
     rmSync(directory, { recursive: true, force: true });
   }
 });
+
+vi.mock("../src/mcp.js", () => ({ registerMcpTools: async () => {} }));
+vi.mock("../src/builtin-tools.js", () => ({ registerBuiltinTools: () => {} }));
+vi.mock("../src/subagents.js", () => ({
+  registerSubagents: () => async () => ({}),
+}));
+
+it("applies client instructions to the native root prompt without leaking them into workspace JSON", async () => {
+  const { default: extension } = await import("../src/extension.js");
+  const directory = mkdtempSync(join(tmpdir(), "pi-root-context-"));
+  const file = join(directory, "workspace.json");
+  const previous = process.env[WORKSPACE_CONFIG_ENV];
+  const on = vi.fn();
+  try {
+    process.env[WORKSPACE_CONFIG_ENV] = file;
+    const write = (mode: string, text: string) =>
+      writeFileSync(
+        file,
+        JSON.stringify({
+          cwd: directory,
+          additionalDirectories: [],
+          systemPrompt: { mode, content: [{ type: "text", text }] },
+        }),
+      );
+    write("append", "Client instruction");
+    await extension({
+      on,
+      registerCommand: () => {},
+    } as unknown as ExtensionAPI);
+    const handler = on.mock.calls.find(
+      ([event]) => event === "before_agent_start",
+    )![1];
+    const appended = handler({
+      systemPrompt: "Native instructions",
+    }).systemPrompt;
+    expect(appended).toContain("Native instructions");
+    expect(appended.match(/Client instruction/g)).toHaveLength(1);
+    write("override", "Replacement instructions");
+    const replaced = handler({
+      systemPrompt: "Native instructions",
+    }).systemPrompt;
+    expect(replaced).toContain("Replacement instructions");
+    expect(replaced).not.toContain("Native instructions");
+    expect(replaced).not.toContain("Client instruction");
+    expect(replaced).toContain(
+      JSON.stringify({ cwd: directory, additionalDirectories: [] }),
+    );
+  } finally {
+    if (previous === undefined) delete process.env[WORKSPACE_CONFIG_ENV];
+    else process.env[WORKSPACE_CONFIG_ENV] = previous;
+    rmSync(directory, { recursive: true, force: true });
+  }
+});

@@ -36,7 +36,7 @@
     "prepublishOnly": "node -e \"for (const arch of ['x64', 'arm64']) require('node:fs').accessSync('native/win32-' + arch + '.node')\""
   },
   "dependencies": {
-    "@agentclientprotocol/sdk": "1.3.0",
+    "@agentclientprotocol/sdk": "1.9.0",
     "@earendil-works/pi-coding-agent": "1.4.0",
     "@modelcontextprotocol/sdk": "1.29.0",
     "acp-extension-core": "0.1.9",

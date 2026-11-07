@@ -217,3 +217,30 @@ diagnostics allowlist: load failures, tool-name conflicts and extension-related
 hints. Other startup failures remain on the process stream and can be added to
 the allowlist later when their presentation is defined; unrelated output is
 never forwarded through ACP.
+
+## Client system prompts
+
+The adapter advertises `sessionCapabilities.systemPrompt.mode.override` and accepts
+standard ACP `systemPrompt` on `session/new`, `session/load`, `session/resume`, and
+`session/fork`:
+
+```json
+{
+  "systemPrompt": {
+    "mode": "append",
+    "content": [{ "type": "text", "text": "Use the project's terminology." }]
+  }
+}
+```
+
+`append` adds instructions to the native prompt; `override` replaces its base
+instructions. Content must contain at least one text block; unsupported modes or
+content return `invalidParams` (-32602). These instructions do not change tool
+permissions or remove required runtime context. They apply to the requested
+session, not sibling sessions. Pass them again when reconnecting or forking to
+ensure the same instructions are used.
+
+The root Pi agent applies these instructions before each turn; subagents retain
+their own native instructions. Workspace context is always retained. Load/resume
+replaces the activation's instructions rather than accumulating them; omission or
+`null` restores native defaults. Instructions stay outside native session history.

@@ -426,7 +426,7 @@ async function start(
         if (update.sessionUpdate === "available_commands_update")
           availableCommands = update.availableCommands;
       },
-      unstable_createElicitation: (request) => answer(request),
+      createElicitation: (request) => answer(request),
       requestPermission: async () => ({ outcome: { outcome: "cancelled" } }),
       extNotification: async (method, params) => {
         if (isLodySubagentEvent(params)) runEvents.push(params);
@@ -651,6 +651,35 @@ async function exerciseWorkspace() {
         cwd,
         roots ?? [],
       );
+    }
+  }
+  await session.client.resumeSession(attachment(sourceId, [a]));
+  for (const mode of ["append", "override"]) {
+    const text = `ACP_CLIENT_SYSTEM_${mode}`;
+    await session.client.resumeSession({
+      ...attachment(sourceId, [a]),
+      systemPrompt: { mode, content: [{ type: "text", text }] },
+    });
+    const offset = bodies.length;
+    const result = await session.client.prompt({
+      sessionId: sourceId,
+      prompt: [{ type: "text", text: "WORKSPACE_SYSTEM_PROMPT" }],
+    });
+    assert.equal(result.stopReason, "end_turn");
+    assert.ok(bodies.length > offset);
+    for (const body of bodies.slice(offset)) {
+      const system = body.messages
+        .filter((m) => m.role === "system")
+        .map((m) => m.content)
+        .join("\n");
+      assert.equal(system.split(text).length - 1, 1);
+      assert.equal(
+        system.includes("WORKSPACE_USER_SYSTEM_PRESERVED"),
+        mode === "append",
+      );
+      if (mode === "override")
+        assert.ok(!system.includes("ACP_CLIENT_SYSTEM_append"));
+      assert.ok(system.includes("ACP workspace directories"));
     }
   }
   await session.client.resumeSession(attachment(sourceId, [a]));
@@ -1518,7 +1547,7 @@ async function exercise(mode) {
   const failingClient = new ClientSideConnection(
     () => ({
       sessionUpdate: async () => {},
-      unstable_createElicitation: () => new Promise(() => {}),
+      createElicitation: () => new Promise(() => {}),
       requestPermission: async () => ({ outcome: { outcome: "cancelled" } }),
       extNotification: async () => {},
     }),
@@ -1583,7 +1612,7 @@ async function exercise(mode) {
   const conflictingClient = new ClientSideConnection(
     () => ({
       sessionUpdate: async () => {},
-      unstable_createElicitation: () => new Promise(() => {}),
+      createElicitation: () => new Promise(() => {}),
       requestPermission: async () => ({ outcome: { outcome: "cancelled" } }),
       extNotification: async () => {},
     }),
