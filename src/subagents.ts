@@ -13,6 +13,8 @@ import { PI_EXTENSIONS_ENV } from "./extensions.js";
 import { resolvePiLaunch } from "./launch.js";
 
 const MAX_OUTPUT = 64 * 1024;
+const DEFAULT_TIMEOUT_SECONDS = 30 * 60;
+const MAX_TIMEOUT_SECONDS = 24 * 60 * 60;
 type Task = {
   info: LodySubagentTask;
   output: string;
@@ -45,6 +47,13 @@ export function registerSubagents(
           description:
             "Optional provider/model-id of an available Pi model. Omit to use the current model.",
         },
+        timeoutSeconds: {
+          type: "integer",
+          minimum: 1,
+          maximum: MAX_TIMEOUT_SECONDS,
+          description:
+            "Total execution time limit in seconds, including startup and tools. Defaults to 1800 (30 minutes); maximum 86400 (24 hours). On timeout the child is stopped and an error is returned.",
+        },
       },
       required: ["task", "description"],
     } as ToolDefinition["parameters"],
@@ -54,6 +63,12 @@ export function registerSubagents(
           task: z.string().min(1),
           description: z.string().min(1),
           model: z.string().min(1).optional(),
+          timeoutSeconds: z
+            .number()
+            .int()
+            .min(1)
+            .max(MAX_TIMEOUT_SECONDS)
+            .default(DEFAULT_TIMEOUT_SECONDS),
         })
         .parse(input);
       if (signal?.aborted) throw new Error("Subagent cancelled before launch");
@@ -94,6 +109,9 @@ export function registerSubagents(
       let finish!: () => void;
       let cancellation: Promise<void> | undefined;
       let forced: ReturnType<typeof setTimeout> | undefined;
+      let deadline: ReturnType<typeof setTimeout> | undefined;
+      let draining: ReturnType<typeof setTimeout> | undefined;
+      let timedOut = false;
       let failed = false;
       let buffer = "";
       let messageId = randomUUID();
@@ -156,6 +174,22 @@ export function registerSubagents(
           }
         }
       };
+      const drainCancelledPipes = () => {
+        if (
+          !cancellation ||
+          draining ||
+          (proc.exitCode === null && proc.signalCode === null)
+        )
+          return;
+        if (forced) clearTimeout(forced);
+        // exit does not mean stdout/stderr have drained, even after SIGKILL.
+        // Start a separate grace after exit, then close inherited readers so
+        // descendants cannot keep the tool waiting. This does not kill them.
+        draining = setTimeout(() => {
+          proc.stdout!.destroy();
+          proc.stderr!.destroy();
+        }, 1000);
+      };
       const task: Task = {
         info,
         output: "",
@@ -164,11 +198,12 @@ export function registerSubagents(
         }),
         cancel: () => {
           if (info.status !== "running") return task.finished;
-          cancellation ??= (async () => {
-            kill(false);
-            forced = setTimeout(() => kill(true), 1000);
-            await task.finished;
-          })();
+          if (cancellation) return cancellation;
+          cancellation = task.finished;
+          if (deadline) clearTimeout(deadline);
+          kill(false);
+          forced = setTimeout(() => kill(true), 1000);
+          drainCancelledPipes();
           return cancellation;
         },
       };
@@ -263,21 +298,35 @@ export function registerSubagents(
       };
       signal?.addEventListener("abort", abort, { once: true });
       if (signal?.aborted) abort();
+      proc.once("exit", drainCancelledPipes);
       proc.once("close", (code) => {
+        if (deadline) clearTimeout(deadline);
         if (forced) clearTimeout(forced);
+        if (draining) clearTimeout(draining);
+        proc.removeListener("exit", drainCancelledPipes);
         signal?.removeEventListener("abort", abort);
-        info.status = cancellation
-          ? "killed"
-          : failed || code !== 0
-            ? "failed"
-            : "completed";
+        info.status = timedOut
+          ? "failed"
+          : cancellation
+            ? "killed"
+            : failed || code !== 0
+              ? "failed"
+              : "completed";
         info.endedAtEpochSeconds = Date.now() / 1000;
-        if (info.status === "killed") info.stopReason = "Cancelled";
+        if (timedOut)
+          info.stopReason = `Subagent timed out after ${args.timeoutSeconds} seconds`;
+        else if (info.status === "killed") info.stopReason = "Cancelled";
         else if (info.status === "failed")
           info.stopReason ??= `Pi exited with code ${code}`;
         publish();
         finish();
       });
+      if (!cancellation) {
+        deadline = setTimeout(() => {
+          timedOut = true;
+          void task.cancel();
+        }, args.timeoutSeconds * 1000);
+      }
       await task.finished;
       return {
         content: [
