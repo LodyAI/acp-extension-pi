@@ -38,6 +38,8 @@ const external = `import {writeFileSync} from 'node:fs'; writeFileSync(${JSON.st
 await writeFile(join(profile, "extensions", "unwanted.ts"), external);
 await writeFile(join(root, ".pi", "extensions", "unwanted.ts"), external);
 const bodies = [];
+// Pi would run a leading `!` and expand `$NAME`; ACP values must arrive verbatim.
+const MCP_LITERAL = "!echo interpolated $HOME ${PATH} $$ $!";
 const reasoningFixtures = {
   initialThinking: [
     { reasoning_content: "a" },
@@ -114,7 +116,13 @@ const server = createServer(async (request, response) => {
     return;
   }
   let tool;
-  if (last?.role !== "tool" && body.tools?.length) {
+  const declared = (body.tools ?? []).map((entry) => entry.function.name);
+  const lastCall = body.messages.findLast(
+    (message) => message.role === "assistant",
+  )?.tool_calls?.[0]?.function.name;
+  // A deferred MCP tool becomes callable after tool_search loads it.
+  const searched = last?.role === "tool" && lastCall === "tool_search";
+  if ((last?.role !== "tool" || searched) && body.tools?.length) {
     if (content.startsWith("WORKSPACE_TOOL:"))
       tool = JSON.parse(content.slice("WORKSPACE_TOOL:".length));
     if (content.startsWith("WORKSPACE_CHILD:"))
@@ -152,11 +160,13 @@ const server = createServer(async (request, response) => {
       tool = ["todo", { action: "add", text: "Verify native adapter" }];
     if (content.includes("CLEAR_TODO")) tool = ["todo", { action: "clear" }];
     if (content.includes("MCP_TEST"))
-      tool = ["mcp_fixture_echo", { value: "native-mcp" }];
-    if (content.includes("MCP_ERROR")) tool = ["mcp_fixture_error", {}];
-    if (content.includes("MCP_IMAGE")) tool = ["mcp_fixture_image", {}];
+      tool = ["mcp__fixture__echo", { value: "native-mcp" }];
+    if (content.includes("MCP_LITERAL"))
+      tool = ["mcp__fixture__echo", { value: "literal" }];
+    if (content.includes("MCP_ERROR")) tool = ["mcp__fixture__error", {}];
+    if (content.includes("MCP_IMAGE")) tool = ["mcp__fixture__image", {}];
     if (content.includes("MCP_RESOURCE"))
-      tool = ["mcp_fixture_echo", { value: "unsupported-resource" }];
+      tool = ["mcp__fixture__echo", { value: "resource-link" }];
     if (content.includes("SUB_TEST"))
       tool = [
         "subagent",
@@ -203,8 +213,9 @@ const server = createServer(async (request, response) => {
     return;
   }
   if (codemodeOnly && body.tools?.length) {
+    // Pi activates tool_search for deferred MCP servers next to codemode.
     assert.deepEqual(
-      body.tools.map((entry) => entry.function.name),
+      declared.filter((name) => name !== "tool_search"),
       ["codemode"],
       "only mode must expose codemode while retaining callable nested tools",
     );
@@ -213,12 +224,20 @@ const server = createServer(async (request, response) => {
         "codemode",
         {
           code:
-            tool[0] === "mcp_fixture_image"
-              ? "const result = await tools.mcp_fixture_image({}); image(result.content.find(block => block.type === 'image'));"
+            tool[0] === "mcp__fixture__image"
+              ? "const result = await tools.mcp__fixture__image({}); image(result.content.find(block => block.type === 'image'));"
               : `text(await tools.${tool[0]}(${JSON.stringify(tool[1])}));`,
         },
       ];
-  }
+  } else if (
+    tool?.[0].startsWith("mcp__") &&
+    !declared.includes(tool[0]) &&
+    !searched
+  )
+    tool = [
+      "tool_search",
+      { query: tool[0].split("__").slice(1).join(" "), limit: 1 },
+    ];
   response.writeHead(200, { "Content-Type": "text/event-stream" });
   const chunk = (delta, finish_reason = null) =>
     response.write(
@@ -390,6 +409,7 @@ async function start(
   open = "resumeSession",
   subagentEvents = false,
   activation = {},
+  extraMcpServers = [],
 ) {
   const runEvents = [];
   const usages = [];
@@ -454,8 +474,12 @@ async function start(
       args: [
         fileURLToPath(new URL("../test/fixtures/mcp.mjs", import.meta.url)),
       ],
-      env: [{ name: "MCP_FIXTURE_TAG", value: "v1" }],
+      env: [
+        { name: "MCP_FIXTURE_TAG", value: "v1" },
+        { name: "MCP_FIXTURE_LITERAL", value: MCP_LITERAL },
+      ],
     },
+    ...extraMcpServers,
   ];
   const result = sessionId
     ? await client[open]({ sessionId, cwd: root, mcpServers, ...activation })
@@ -766,7 +790,7 @@ async function exerciseWorkspace() {
       assertToolText(
         await tool(
           child.sessionId,
-          "mcp_forkfixture_echo",
+          "mcp__forkfixture__echo",
           { value: "fork-isolated" },
           targetCwd,
           roots,
@@ -792,7 +816,7 @@ async function exerciseWorkspace() {
         sourceId,
         "codemode",
         {
-          code: "text(ALL_TOOLS.some(tool => tool.name === 'mcp_forkfixture_echo') ? 'MCP_LEAK' : 'MCP_ISOLATED');",
+          code: "text(ALL_TOOLS.some(tool => tool.name === 'mcp__forkfixture__echo') ? 'MCP_LEAK' : 'MCP_ISOLATED');",
         },
         cwd,
         [a],
@@ -804,7 +828,7 @@ async function exerciseWorkspace() {
       sourceRequests.every(
         (body) =>
           !body.tools.some(
-            (tool) => tool.function.name === "mcp_forkfixture_echo",
+            (tool) => tool.function.name === "mcp__forkfixture__echo",
           ),
       ),
       "fork MCP tools do not enter source activation",
@@ -919,6 +943,137 @@ async function exerciseTurnFork() {
   await source.close();
 }
 
+async function exerciseMcp() {
+  // Ambient Pi MCP configuration must not enter a Lody session.
+  const ambient = {
+    mcpServers: {
+      ambient: {
+        command: process.execPath,
+        args: [
+          fileURLToPath(new URL("../test/fixtures/mcp.mjs", import.meta.url)),
+        ],
+        exposure: "direct",
+      },
+    },
+  };
+  await writeFile(join(profile, "mcp.json"), JSON.stringify(ambient));
+  await writeFile(join(root, ".pi", "mcp.json"), JSON.stringify(ambient));
+  const broken = {
+    name: "broken server",
+    command: join(root, "missing-mcp-server"),
+    args: [],
+    env: [],
+  };
+  const beforeStart = updates.length;
+  const session = await start(
+    undefined,
+    [],
+    "localtest",
+    "resumeSession",
+    false,
+    {},
+    [broken],
+  );
+  const offset = bodies.length;
+  await session.prompt("MCP_TEST");
+  const requests = bodies.slice(offset);
+  const names = (body) => (body.tools ?? []).map((tool) => tool.function.name);
+  assert.ok(names(requests[0]).includes("tool_search"));
+  assert.ok(
+    requests.every(
+      (body) => !names(body).some((name) => name.includes("ambient")),
+    ),
+    "ambient mcp.json servers are not loaded",
+  );
+  if (!codemodeOnly) {
+    assert.ok(
+      !names(requests[0]).some((name) => name.startsWith("mcp__")),
+      "deferred MCP tools are not declared before tool_search loads them",
+    );
+    const system = JSON.stringify(requests[0].messages);
+    assert.ok(system.includes("mcp__fixture (tool_search)"), system);
+    assert.ok(
+      names(requests.at(-1)).includes("mcp__fixture__echo"),
+      "tool_search loads the MCP tool for the next call",
+    );
+  }
+  assert.ok(
+    requests.some((body) =>
+      JSON.stringify(body.messages).includes("MCP:v1:native-mcp"),
+    ),
+  );
+  assert.ok(
+    updates
+      .slice(beforeStart)
+      .some((update) =>
+        JSON.stringify(update._meta?.lody?.notice?.message ?? "").includes(
+          "broken_server",
+        ),
+      ),
+    "a failing server is reported without failing the session",
+  );
+  const id = session.id;
+  await session.close();
+  // A client override replaces Pi's prompt but keeps the deferred servers listed.
+  // A new session: a prompt before the server reconnects would drop the loaded tools
+  // from the resumed transcript that the check below relies on.
+  const override = await start(
+    undefined,
+    [],
+    "localtest",
+    "resumeSession",
+    false,
+    {
+      systemPrompt: {
+        mode: "override",
+        content: [{ type: "text", text: "ACP_CLIENT_SYSTEM_mcp" }],
+      },
+    },
+  );
+  const overrideOffset = bodies.length;
+  await override.prompt("OVERRIDE_MCP");
+  const overrideSystem = bodies[overrideOffset].messages
+    .filter((m) => m.role === "system")
+    .map((m) => m.content)
+    .join("\n");
+  assert.ok(overrideSystem.startsWith("ACP_CLIENT_SYSTEM_mcp"), overrideSystem);
+  assert.ok(overrideSystem.includes("<mcp_servers>\n"), overrideSystem);
+  assert.ok(overrideSystem.includes("mcp__fixture ("), overrideSystem);
+  assert.ok(!overrideSystem.includes("expert coding assistant"));
+  await override.close();
+  if (!codemodeOnly) {
+    const resumed = await start(id);
+    // /mcp waits for startup connections without starting a model turn, so the
+    // restored loadout's MCP tools are registered before the next prompt.
+    const beforeStatus = updates.length;
+    assert.equal((await resumed.prompt("/mcp")).stopReason, "end_turn");
+    assert.ok(
+      updates
+        .slice(beforeStatus)
+        .some((update) =>
+          /fixture: connected, 4 tools \(deferred\)/.test(
+            update._meta?.lody?.notice?.message ?? "",
+          ),
+        ),
+      "/mcp reports the selected servers",
+    );
+    const before = bodies.length;
+    await resumed.prompt("RECOVER_TEST");
+    assert.ok(
+      names(bodies[before]).includes("mcp__fixture__echo"),
+      "loaded MCP tools survive resume",
+    );
+    await resumed.close();
+  }
+  await Promise.all([
+    unlink(join(profile, "mcp.json")),
+    unlink(join(root, ".pi", "mcp.json")),
+  ]);
+  console.log(
+    `MCP smoke passed (${codemodeOnly ? "codemode only" : "ordinary tools"}): tool_search loading, verbatim env, ambient mcp.json exclusion, failing-server notice, /mcp status, override prompt section and resume`,
+  );
+}
+
 async function exercise(mode) {
   codemodeOnly = mode;
   deadline.refresh();
@@ -934,6 +1089,7 @@ async function exercise(mode) {
   await writeFile(join(profile, "settings.json"), JSON.stringify(settings));
   await exerciseWorkspace();
   await exerciseTurnFork();
+  await exerciseMcp();
   bodies.length = 0;
   updates.length = 0;
   const a = await start();
@@ -1044,7 +1200,7 @@ async function exercise(mode) {
   assert.ok(
     updates.some(
       (update) =>
-        update.title === "mcp_fixture_error" && update.status === "failed",
+        update.title === "mcp__fixture__error" && update.status === "failed",
     ),
   );
   const beforeMcpImage = bodies.length;
@@ -1052,7 +1208,7 @@ async function exercise(mode) {
   assert.ok(
     updates.some(
       (update) =>
-        update.title === "mcp_fixture_image" &&
+        update.title === "mcp__fixture__image" &&
         update.status === "completed" &&
         update.content?.some(
           (block) => block.type === "content" && block.content.type === "image",
@@ -1073,19 +1229,30 @@ async function exercise(mode) {
       ),
     "MCP image must reach the model, including through codemode image()",
   );
-  const beforeUnsupported = updates.length;
+  const beforeResource = updates.length;
   await a.prompt("MCP_RESOURCE");
   assert.ok(
     updates
-      .slice(beforeUnsupported)
+      .slice(beforeResource)
       .some(
         (update) =>
-          update.title === "mcp_fixture_echo" &&
-          update.status === "failed" &&
+          (update.title === "mcp__fixture__echo" ||
+            update.title === "codemode") &&
+          update.status === "completed" &&
           JSON.stringify(update.content).includes(
-            "Unsupported MCP content type: resource_link",
+            "[Resource file:///synthetic.txt",
           ),
       ),
+    "Pi presents resource links as text",
+  );
+  await a.prompt("MCP_LITERAL");
+  assert.ok(
+    updates.some((update) =>
+      JSON.stringify(update.content ?? "").includes(
+        JSON.stringify(`LITERAL:${MCP_LITERAL}`).slice(1, -1),
+      ),
+    ),
+    "ACP env values reach the server without Pi interpolation",
   );
   assert.equal((await a.prompt("ASK_TEST")).stopReason, "end_turn");
   assert.ok(
@@ -1224,7 +1391,7 @@ async function exercise(mode) {
   assert.ok(
     replay.some(
       (update) =>
-        update.title === "mcp_fixture_error" && update.status === "failed",
+        update.title === "mcp__fixture__error" && update.status === "failed",
     ),
   );
   assert.ok(

@@ -1,162 +1,120 @@
-import { readFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import type { McpServer } from "@agentclientprotocol/sdk";
-import type {
-  ExtensionAPI,
-  ToolDefinition,
-} from "@earendil-works/pi-coding-agent";
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
-import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import {
-  CallToolResultSchema,
-  TextContentSchema,
-  ImageContentSchema,
-  type CallToolResult,
-} from "@modelcontextprotocol/sdk/types.js";
-import { z } from "zod";
-
-const outputSchema = z.toJSONSchema(
-  CallToolResultSchema.extend({
-    content: z.array(z.union([TextContentSchema, ImageContentSchema])),
-  }).pick({ content: true, structuredContent: true, isError: true }),
-) as ToolDefinition["outputSchema"];
+  createMcpExtension,
+  createToolSearchExtension,
+  type ExtensionAPI,
+  type McpServerConfig,
+} from "@earendil-works/pi-coding-agent";
 
 export const MCP_CONFIG_ENV = "LODY_PI_MCP_CONFIG";
 type StdioServer = Extract<McpServer, { command: string }>;
 type HttpServer = Extract<McpServer, { url: string }>;
 type SelectedServer = StdioServer | HttpServer;
 
-function createTransport(server: SelectedServer) {
-  if ("url" in server)
-    return new StreamableHTTPClientTransport(new URL(server.url), {
-      requestInit: {
-        headers: Object.fromEntries(
-          server.headers.map(({ name, value }) => [name, value]),
-        ),
-      },
-    });
-  return new StdioClientTransport({
-    command: server.command,
-    args: server.args,
-    env: Object.fromEntries(server.env.map(({ name, value }) => [name, value])),
-    cwd: process.cwd(),
-    stderr: "ignore",
+/**
+ * Pi resolves `$NAME`, `${NAME}` and a leading `!command` in env and header values.
+ * ACP values are already final, so escape them to reach the server unchanged.
+ */
+export function literalConfigValue(value: string): string {
+  const escaped = value.replaceAll("$", () => "$$");
+  return escaped.startsWith("!") ? `$${escaped}` : escaped;
+}
+
+const literalRecord = (entries: { name: string; value: string }[]) =>
+  Object.fromEntries(
+    entries.map(({ name, value }) => [name, literalConfigValue(value)]),
+  );
+
+/** Pi's prompt section listing servers whose tools are reached through `tool_search`. */
+export const MCP_SERVERS_SECTION = "mcp_servers";
+
+const namespaceKey = (name: string) => name.replace(/-/g, "_");
+const shortHash = (value: string) =>
+  createHash("sha256").update(value).digest("hex").slice(0, 6);
+
+/**
+ * Pi server names allow only letters, digits, `_` and `-`, and `-`/`_` variants share
+ * one tool namespace. Lody names are free-form display names. Names that collide after
+ * mapping all take a hash of their server identity, so a resumed transcript's loaded
+ * `mcp__<server>__*` tools keep pointing at the same server whatever the selection order.
+ */
+function serverNames(servers: readonly SelectedServer[]): string[] {
+  const bases = servers.map(
+    (server) => server.name.replace(/[^A-Za-z0-9_-]/g, "_") || "server",
+  );
+  const counts = new Map<string, number>();
+  for (const base of bases)
+    counts.set(namespaceKey(base), (counts.get(namespaceKey(base)) ?? 0) + 1);
+  const taken = new Set<string>();
+  return servers.map((server, index) => {
+    const base = bases[index]!;
+    let name = base;
+    if (counts.get(namespaceKey(base))! > 1) {
+      const target =
+        "url" in server ? [server.url] : [server.command, ...server.args];
+      name = `${base}_${shortHash(JSON.stringify([server.name, ...target]))}`;
+    }
+    // Only an exact duplicate (same name and target) still collides.
+    const unique = name;
+    for (let suffix = 2; taken.has(namespaceKey(name)); suffix++)
+      name = `${unique}_${suffix}`;
+    taken.add(namespaceKey(name));
+    return name;
   });
 }
 
-/** Loaded in Pi: native tools own calls and cancellation; the SDK owns transport. */
-export async function registerMcpTools(pi: ExtensionAPI): Promise<void> {
+/** The ACP selection as Pi MCP servers whose tools `tool_search` loads on demand. */
+export function toPiMcpServers(
+  servers: readonly SelectedServer[],
+): { name: string; config: McpServerConfig }[] {
+  const names = serverNames(servers);
+  return servers.map((server, index) => ({
+    name: names[index]!,
+    config:
+      "url" in server
+        ? {
+            type: "http",
+            url: server.url,
+            headers: literalRecord(server.headers),
+            exposure: "deferred",
+          }
+        : {
+            type: "stdio",
+            command: server.command,
+            args: server.args,
+            env: literalRecord(server.env),
+            exposure: "deferred",
+          },
+  }));
+}
+
+/**
+ * Loaded in Pi: Pi's own MCP extension connects the ACP-selected servers. It reads no
+ * mcp.json, so the session uses only the servers Lody selected.
+ */
+export function registerMcp(pi: ExtensionAPI): void {
   const configPath = process.env[MCP_CONFIG_ENV];
   if (!configPath) throw new Error("Missing Lody Pi runtime configuration");
   const servers = JSON.parse(
-    await readFile(configPath, "utf8"),
+    readFileSync(configPath, "utf8"),
   ) as SelectedServer[];
-  const clients: Client[] = [];
-  const tools = new Set<string>();
-  const close = async () => {
-    await Promise.allSettled(clients.map((client) => client.close()));
-  };
-  pi.on("session_shutdown", close);
-  pi.on("session_start", () => {
-    // Native resume restores the transcript's declared loadout after registering
-    // extensions. This activation's selected MCP tools may not exist in that
-    // transcript. Add their direct declarations through the native API, keeping
-    // every non-MCP selection and native filtering/codemode projection intact.
-    // Old request tools are absent from the newly loaded extension registry.
-    const selected = pi
-      .getAllTools()
-      .filter(
-        (tool) =>
-          tools.has(tool.name) &&
-          (tool.exposure === undefined ||
-            tool.exposure === "direct" ||
-            tool.exposure === "model-only"),
-      )
-      .map((tool) => tool.name);
-    pi.setActiveTools([...new Set([...pi.getActiveTools(), ...selected])]);
-  });
-  // Pi's tool result hook preserves the MCP error flag.
-  pi.on("tool_result", (event) => {
-    if (
-      tools.has(event.toolName) &&
-      event.details &&
-      typeof event.details === "object" &&
-      "isError" in event.details &&
-      event.details.isError === true
-    )
-      return { isError: true };
-  });
-  try {
-    for (const server of servers) {
-      const client = new Client({ name: "lody-pi", version: "0.1.0" });
-      clients.push(client);
-      const transport = createTransport(server);
-      await client.connect(transport, { timeout: 30_000 });
-      let cursor: string | undefined;
-      do {
-        const page = await client.listTools({ cursor });
-        for (const tool of page.tools) {
-          const name = `mcp_${server.name}_${tool.name}`.replace(
-            /[^a-zA-Z0-9_-]/g,
-            "_",
-          );
-          if (name.length > 64 || tools.has(name))
-            throw new Error(
-              "MCP tool names must be unique and at most 64 characters",
-            );
-          tools.add(name);
-          pi.registerTool({
-            name,
-            label: `${server.name}: ${tool.name}`,
-            description: tool.description ?? tool.name,
-            parameters: tool.inputSchema as ToolDefinition["parameters"],
-            outputSchema,
-            async execute(_id, args, signal) {
-              // The SDK validates this schema but types the result as a compatibility union.
-              const result = (await client.callTool(
-                {
-                  name: tool.name,
-                  arguments: args as Record<string, unknown>,
-                },
-                CallToolResultSchema,
-                { signal },
-              )) as CallToolResult;
-              const content = result.content.map((block) => {
-                if (block.type !== "text" && block.type !== "image")
-                  throw new Error(
-                    `Unsupported MCP content type: ${block.type}. Pi V1 supports text and images only.`,
-                  );
-                return block;
-              });
-              if (result.structuredContent)
-                content.push({
-                  type: "text",
-                  text: JSON.stringify(result.structuredContent),
-                });
-              return {
-                content,
-                details: { isError: result.isError === true },
-                // Codemode receives structuredContent for tools with an output
-                // schema; keep the MCP blocks so scripts can call image().
-                structuredContent: z.json().parse({
-                  content: result.content,
-                  ...(result.structuredContent
-                    ? { structuredContent: result.structuredContent }
-                    : {}),
-                  isError: result.isError === true,
-                }),
-              };
-            },
-          });
-        }
-        cursor = page.nextCursor;
-      } while (cursor);
+  const errors: string[] = [];
+  for (const { name, config } of toPiMcpServers(servers)) {
+    try {
+      pi.registerMcpServer(name, config);
+    } catch (error) {
+      // Pi's validation messages name the field, never its value.
+      errors.push(error instanceof Error ? error.message : String(error));
     }
-  } catch {
-    await close();
-    // Configuration can contain credentials; don't put SDK/command errors in history.
-    throw new Error(
-      "MCP initialization failed; check server configuration and tool names",
-    );
   }
+  createToolSearchExtension()(pi);
+  createMcpExtension({
+    loadConfig: () => ({ servers: [], errors, autoEnableCodemode: false }),
+    logPath: join(dirname(configPath), "mcp.log"),
+    // RPC mode has no browser hand-off; servers that need OAuth report it instead.
+    openUrl: () => {},
+  })(pi);
 }
