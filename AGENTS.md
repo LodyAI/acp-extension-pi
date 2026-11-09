@@ -13,9 +13,9 @@ workspace packages or reimplement Pi's executor.
   extension, never the packaged tools extension. This is a supported-feature boundary, not a sandbox against
   arbitrary bash: selected extension code can add tools and no arbitrary
   plugin compatibility is promised.
-- Packaged tools are questionnaire, todo, subagent and ACP-selected stdio and streamable HTTP MCP
-  tools. Their execute promises own all work. No detached callbacks, hot reload,
-  extension-driven session replacement or custom compaction.
+- Packaged tools are questionnaire, todo and subagent; Pi's own MCP and tool_search
+  extensions run inside the packaged extension. Their execute promises own all work.
+  No detached callbacks, hot reload, extension-driven session replacement or custom compaction.
 - Only the main agent asks questions. Questionnaire handles one or many questions
   through Lody form elicitation. Stop closes questions; late answers cannot enter
   another request. Do not implement terminal UI.
@@ -66,11 +66,11 @@ workspace packages or reimplement Pi's executor.
   Unexpected Pi exit terminates the ACP connection with a nonzero adapter exit.
   Ship CI-built Node-API binaries for Windows x64/ARM64; no user-side compilation
   or taskkill fallback when the native module cannot load or join the Job.
-- MCP names use the reserved mcp_ prefix and must be unique after normalization.
-  Support text/image results; reject other content types instead of stringifying
-  them. Preserve error flags and cancellation. Codemode receives the structured
-  MCP result so image blocks remain callable through image(). Configuration secrets stay
-  in private temporary files, never native history.
+- MCP uses only the ACP selection: Pi's MCP extension with no mcp.json, each server
+  registered `deferred` so tool_search loads its `mcp__<server>__<tool>` tools. Do not
+  reimplement Pi's client, naming or result conversion. ACP env/header values are final:
+  escape them against Pi's `$`/`!` resolution. A failing server is a notice, never an
+  activation failure. A client `override` prompt keeps the `mcp_servers` section. Configuration secrets stay in private temporary files, never native history.
 - Use acp-extension-core contracts. Advertise only implemented capabilities.
   Activation publishes one command catalog in the session response (Lody capability
   discovery) and ACP available_commands_update. Pi owns discovered commands; the

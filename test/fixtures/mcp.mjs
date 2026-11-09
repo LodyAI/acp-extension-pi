@@ -59,13 +59,20 @@ server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
             data: "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAEElEQVR4nGP4z8DwHwohFABFzAf5Zsv/OQAAAABJRU5ErkJggg==",
           },
         ]
-      : [
-          {
-            type: "text",
-            text: `MCP:${process.env.MCP_FIXTURE_TAG}:${request.params.arguments?.value ?? request.params.name}`,
-          },
-        ];
-  if (request.params.arguments?.value === "unsupported-resource")
+      : request.params.arguments?.value === "literal"
+        ? [
+            {
+              type: "text",
+              text: `LITERAL:${process.env.MCP_FIXTURE_LITERAL}`,
+            },
+          ]
+        : [
+            {
+              type: "text",
+              text: `MCP:${process.env.MCP_FIXTURE_TAG}:${request.params.arguments?.value ?? request.params.name}`,
+            },
+          ];
+  if (request.params.arguments?.value === "resource-link")
     content.push({
       type: "resource_link",
       uri: "file:///synthetic.txt",

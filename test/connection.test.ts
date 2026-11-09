@@ -371,6 +371,37 @@ describe("native Pi connection", () => {
     p.close();
   });
 
+  it("delivers startup notices from a replacement runtime to its activation", async () => {
+    const p = peer();
+    await p.client.initialize({ protocolVersion: 1 });
+    p.setSession((request) => {
+      // Pi's MCP extension reports failed servers while the session starts.
+      p.emit({
+        type: "extension_ui_request",
+        method: "notify",
+        message: "MCP servers need attention:\n  broken: failed",
+        notifyType: "warning",
+      });
+      p.reply(request, { cancelled: false });
+    });
+    await p.client.newSession({ cwd: "/work", mcpServers: [] });
+    expect(
+      p.updates.flatMap(({ sessionId, update }) =>
+        update._meta?.lody?.notice ? [{ sessionId, ...update._meta.lody }] : [],
+      ),
+    ).toEqual([
+      {
+        sessionId: nativeSession,
+        notice: {
+          level: "warning",
+          message: "MCP servers need attention:\n  broken: failed",
+          source: "pi",
+        },
+      },
+    ]);
+    p.close();
+  });
+
   it.each(["error", "malformed"])(
     "does not hide a %s command catalog failure",
     async (failure) => {

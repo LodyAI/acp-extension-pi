@@ -267,6 +267,8 @@ export class PiRpcConnection implements AgentConnection {
     ReturnType<typeof deferred<unknown>>
   >();
   private pendingPlan?: acp.PlanEntry[];
+  /** Notices from a starting runtime, such as MCP connection problems. */
+  private pendingNotices: acp.SessionNotification["update"][] = [];
   /** Live per-response usage of this activation. Pi stats are a sum over the
    * current context, not a counter: compaction, retries and branching lower them
    * and resume restores history, so they never feed accounting. */
@@ -398,6 +400,8 @@ export class PiRpcConnection implements AgentConnection {
       await this.update({ sessionUpdate: "plan", entries: this.pendingPlan });
       this.pendingPlan = undefined;
     }
+    for (const notice of this.pendingNotices.splice(0))
+      await this.update(notice);
     const { configOptions, capabilityMeta } = await this.readConfig();
     const availableCommands = await this.readCommands();
     await this.update({
@@ -879,10 +883,16 @@ export class PiRpcConnection implements AgentConnection {
     message: string,
     level: "info" | "warning" | "error" = "info",
   ) {
-    return this.update({
+    const update: acp.SessionNotification["update"] = {
       sessionUpdate: "session_info_update",
       _meta: { lody: { notice: { level, message, source: "pi" } } },
-    });
+    };
+    // A replacement runtime can report before its activation has an ACP id.
+    if (this.configuring && !this.sessionId) {
+      this.pendingNotices.push(update);
+      return Promise.resolve();
+    }
+    return this.update(update);
   }
 
   private observeSession(file: string | undefined): void {
@@ -1638,7 +1648,10 @@ export class PiRpcConnection implements AgentConnection {
     this.configuring = true;
     // A replacement can change Pi's durable identity before its ACK or config succeeds.
     // Never let an old ACP id address that new file, including after failure.
-    if (replaceSession) this.sessionId = "";
+    if (replaceSession) {
+      this.sessionId = "";
+      this.pendingNotices = [];
+    }
     try {
       return await action();
     } catch (error) {

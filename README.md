@@ -34,8 +34,8 @@ auto-discovery; nothing outside an explicit -e/--extension path and the
 packaged extension and Pi's built-in codemode extension is loaded.
 Codemode stays inactive unless selected through Pi's `defaultTools` setting.
 For example, `{"defaultTools":["+codemode"],"codemode":{"mode":"only"}}`
-routes tools through codemode in both parent and child sessions. Pi's built-in
-MCP discovery remains disabled; ACP supplies MCP servers through the existing bridge.
+routes tools through codemode in both parent and child sessions. MCP servers come
+only from the ACP request; Pi's `mcp.json` files are not read (see MCP below).
 `node dist/index.js --list-extensions` performs
 a read-only scan of globally installed extensions and prints candidates as
 JSON; it never executes extension code. The same explicitly selected paths
@@ -70,7 +70,9 @@ runtime is still required before this reaches Lody's installed Pi provider.
   UI and detached extension work are not supported.
 - Per-response token usage by model (including compaction summaries and
   subagents), native context snapshots, automatic compaction activity and /compact.
-- ACP-selected stdio and streamable HTTP MCP tools with text/image results and cancellation. Legacy SSE and ACP transports are not supported.
+- ACP-selected stdio and streamable HTTP MCP servers, connected by Pi's MCP
+  extension and loaded on demand through `tool_search`. Legacy SSE and ACP
+  transports are not supported.
 - Questionnaire: one or more questions in Lody's existing question card.
 - Todo: list/add/toggle/clear through Lody's existing checklist.
 - Subagent: native Lody task lifecycle, list, output and individual cancellation.
@@ -106,11 +108,34 @@ sessions are outside the recovery/fork contract.
 
 Implementation and validation: [additional directories note](.agents/notes/implemented/feature/2026-10-18-additional-directories.md).
 
-MCP audio, resource links and embedded resources are unsupported: a result containing
-any of these fails explicitly, including mixed results. Structured JSON output is
-appended as text. This validates returned content; it cannot undo an MCP tool's effects.
-Codemode calls also receive the structured MCP result (`content`,
-`structuredContent`, `isError`), so scripts can pass image blocks to `image()`.
+## MCP
+
+The packaged extension runs Pi's own MCP and `tool_search` extensions and registers
+each ACP-selected server with `exposure: "deferred"`. Pi's global and project
+`mcp.json` are not read, so a session sees exactly the servers Lody selected.
+The model initially sees only `tool_search` and a `mcp_servers` system-prompt
+section naming each server; `tool_search` loads matching `mcp__<server>__<tool>`
+tools for the next call. The loaded set is recorded in the native transcript, so
+it survives resume and fork. Codemode scripts can call every selected MCP tool.
+
+Server names are normalized to Pi's `[A-Za-z0-9_-]` (other characters become `_`;
+names that collide get a short hash of the server's name and target, so a resumed
+transcript's loaded tools keep their server regardless of selection order). ACP env and header values are passed verbatim:
+the adapter escapes `$` and a leading `!`, which Pi would otherwise expand as an
+environment variable or run as a shell command. Stdio servers inherit the Pi
+process environment, as in native Pi. Pi converts results (text, images, resource
+links, embedded resources, structured content), truncates oversized output to a
+temporary file and applies per-request timeouts.
+
+Servers connect in the background. A server that fails to start or needs an OAuth
+sign-in is reported as one Lody notice; the session still starts and other servers
+remain usable. `/mcp` prints connection status and `/mcp reconnect [server]`
+retries. RPC mode cannot open a browser, so interactive OAuth sign-in is not
+available; supply an `Authorization` header instead. Server log messages go to the
+activation's private temporary directory. Selection changes apply on the next
+new/resume/load/fork, not mid-session. Subagents do not inherit MCP servers.
+
+Decision and verification: [deferred MCP note](.agents/notes/implemented/feature/2026-11-06-deferred-mcp-tool-search.md).
 
 Questionnaire waits inside the parent tool call and returns answers or cancellation.
 Late answers are ignored. Child agents do not ask questions; they report missing
@@ -201,7 +226,10 @@ subagent. The entire smoke runs in ordinary-tool and codemode-only modes, includ
 stats, manual compaction and extension commands handled without a model turn.
 It verifies real file read/write/edit and shell effects, image input and MCP images
 in the model request, per-response usage, steering, provider-error recovery and
-explicit child model selection and tool isolation.
+explicit child model selection and tool isolation. MCP coverage includes
+`tool_search` loading, verbatim env values, exclusion of ambient `mcp.json`, a
+failing server that only produces a notice, `/mcp` status, the `mcp_servers`
+section under a client `override` prompt and the loaded tools surviving resume.
 The same script accepts an installed dist/index.js path.
 
 Upgrade decision and verification limits: [Pi 1.4 runtime note](.agents/notes/implemented/feature/2026-10-28-pi-1.4-runtime.md).
@@ -241,6 +269,7 @@ session, not sibling sessions. Pass them again when reconnecting or forking to
 ensure the same instructions are used.
 
 The root Pi agent applies these instructions before each turn; subagents retain
-their own native instructions. Workspace context is always retained. Load/resume
+their own native instructions. Workspace context and the `mcp_servers` section
+(see MCP) are always retained. Load/resume
 replaces the activation's instructions rather than accumulating them; omission or
 `null` restores native defaults. Instructions stay outside native session history.

@@ -38,7 +38,10 @@ it("adds a child workspace snapshot while preserving native user prompt and regi
   }
 });
 
-vi.mock("../src/mcp.js", () => ({ registerMcpTools: async () => {} }));
+vi.mock("../src/mcp.js", () => ({
+  MCP_SERVERS_SECTION: "mcp_servers",
+  registerMcp: () => {},
+}));
 vi.mock("../src/builtin-tools.js", () => ({ registerBuiltinTools: () => {} }));
 vi.mock("../src/subagents.js", () => ({
   registerSubagents: () => async () => ({}),
@@ -69,20 +72,28 @@ it("applies client instructions to the native root prompt without leaking them i
     const handler = on.mock.calls.find(
       ([event]) => event === "before_agent_start",
     )![1];
-    const appended = handler({
+    const event = (sections: Record<string, string> = {}) => ({
       systemPrompt: "Native instructions",
-    }).systemPrompt;
+      systemPromptOptions: { sections },
+    });
+    const appended = handler(event()).systemPrompt;
     expect(appended).toContain("Native instructions");
     expect(appended.match(/Client instruction/g)).toHaveLength(1);
     write("override", "Replacement instructions");
-    const replaced = handler({
-      systemPrompt: "Native instructions",
-    }).systemPrompt;
+    const replaced = handler(event()).systemPrompt;
     expect(replaced).toContain("Replacement instructions");
     expect(replaced).not.toContain("Native instructions");
     expect(replaced).not.toContain("Client instruction");
     expect(replaced).toContain(
       JSON.stringify({ cwd: directory, additionalDirectories: [] }),
+    );
+    expect(replaced).not.toContain("<mcp_servers>");
+    // Deferred MCP servers stay discoverable when the client replaces the prompt.
+    const withMcp = handler(
+      event({ mcp_servers: "- mcp__fixture (tool_search)" }),
+    ).systemPrompt;
+    expect(withMcp).toMatch(
+      /^Replacement instructions\n\n<mcp_servers>\n- mcp__fixture \(tool_search\)\n<\/mcp_servers>\n\nACP workspace directories/,
     );
   } finally {
     if (previous === undefined) delete process.env[WORKSPACE_CONFIG_ENV];

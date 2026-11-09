@@ -1,6 +1,6 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { randomUUID } from "node:crypto";
-import { registerMcpTools } from "./mcp.js";
+import { MCP_SERVERS_SECTION, registerMcp } from "./mcp.js";
 import { registerBuiltinTools } from "./builtin-tools.js";
 import { registerSubagents } from "./subagents.js";
 import { readWorkspace, workspaceContext } from "./workspace.js";
@@ -19,13 +19,24 @@ export default async function lodyExtension(pi: ExtensionAPI): Promise<void> {
     ctx.ui.notify("lody-rpc:" + JSON.stringify(event), "info");
   // A private invocation per loaded runtime avoids sharing the public command namespace.
   const command = `lody-steer-${randomUUID()}`;
+  // MCP adds its `mcp_servers` section before the workspace handler renders the prompt.
+  registerMcp(pi);
   pi.on("before_agent_start", (event) => {
     const workspace = readWorkspace();
     const instructions = workspace.systemPrompt;
     const text = instructions?.content.map((block) => block.text).join("\n\n");
+    // An override replaces Pi's prompt, but the model still needs runtime context:
+    // the deferred MCP servers it can reach and the ACP workspace directories.
+    const mcpServers = event.systemPromptOptions.sections[MCP_SERVERS_SECTION];
     const prompt =
       instructions?.mode === "override"
-        ? text!
+        ? [
+            text!,
+            mcpServers &&
+              `<${MCP_SERVERS_SECTION}>\n${mcpServers}\n</${MCP_SERVERS_SECTION}>`,
+          ]
+            .filter(Boolean)
+            .join("\n\n")
         : [event.systemPrompt, text]
             .filter((part) => part !== undefined)
             .join("\n\n");
@@ -43,7 +54,6 @@ export default async function lodyExtension(pi: ExtensionAPI): Promise<void> {
   pi.on("session_shutdown", (_event, ctx) => {
     emit(ctx, { type: "lody_not_ready" });
   });
-  await registerMcpTools(pi);
   pi.on("session_start", (_event, ctx) => {
     emit(ctx, {
       type: "lody_steer_ready",
