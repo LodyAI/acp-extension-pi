@@ -106,6 +106,10 @@ sessions are outside the recovery/fork contract.
 
 Implementation and validation: [additional directories note](.agents/notes/implemented/feature/2026-10-18-additional-directories.md).
 
+If a selected MCP server prevents a session from opening, the ACP error names
+the server and identifies the failed step (connection, tool listing or tool
+registration). Check the server configuration or deselect it and retry.
+
 MCP audio, resource links and embedded resources are unsupported: a result containing
 any of these fails explicitly, including mixed results. Structured JSON output is
 appended as text. This validates returned content; it cannot undo an MCP tool's effects.

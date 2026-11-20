@@ -43,7 +43,13 @@ export default async function lodyExtension(pi: ExtensionAPI): Promise<void> {
   pi.on("session_shutdown", (_event, ctx) => {
     emit(ctx, { type: "lody_not_ready" });
   });
-  await registerMcpTools(pi);
+  const failure = await registerMcpTools(pi);
+  if (failure) {
+    pi.on("session_start", (_event, ctx) => {
+      emit(ctx, { type: "lody_mcp_start_failed", message: failure });
+    });
+    return;
+  }
   pi.on("session_start", (_event, ctx) => {
     emit(ctx, {
       type: "lody_steer_ready",

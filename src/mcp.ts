@@ -9,6 +9,8 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import {
   CallToolResultSchema,
+  McpError,
+  ErrorCode,
   TextContentSchema,
   ImageContentSchema,
   type CallToolResult,
@@ -45,7 +47,9 @@ function createTransport(server: SelectedServer) {
 }
 
 /** Loaded in Pi: native tools own calls and cancellation; the SDK owns transport. */
-export async function registerMcpTools(pi: ExtensionAPI): Promise<void> {
+export async function registerMcpTools(
+  pi: ExtensionAPI,
+): Promise<string | undefined> {
   const configPath = process.env[MCP_CONFIG_ENV];
   if (!configPath) throw new Error("Missing Lody Pi runtime configuration");
   const servers = JSON.parse(
@@ -86,24 +90,29 @@ export async function registerMcpTools(pi: ExtensionAPI): Promise<void> {
     )
       return { isError: true };
   });
-  try {
-    for (const server of servers) {
+  for (const server of servers) {
+    const label = JSON.stringify(server.name.slice(0, 128));
+    let failure = `Could not connect to MCP server ${label}`;
+    try {
       const client = new Client({ name: "lody-pi", version: "0.1.0" });
       clients.push(client);
       const transport = createTransport(server);
       await client.connect(transport, { timeout: 30_000 });
       let cursor: string | undefined;
       do {
+        failure = `Could not list tools from MCP server ${label}`;
         const page = await client.listTools({ cursor });
+        failure = `Could not register tools from MCP server ${label}`;
         for (const tool of page.tools) {
           const name = `mcp_${server.name}_${tool.name}`.replace(
             /[^a-zA-Z0-9_-]/g,
             "_",
           );
-          if (name.length > 64 || tools.has(name))
-            throw new Error(
-              "MCP tool names must be unique and at most 64 characters",
-            );
+          if (name.length > 64 || tools.has(name)) {
+            failure +=
+              ": normalized tool names must be unique and at most 64 characters";
+            throw new Error(failure);
+          }
           tools.add(name);
           pi.registerTool({
             name,
@@ -151,12 +160,14 @@ export async function registerMcpTools(pi: ExtensionAPI): Promise<void> {
         }
         cursor = page.nextCursor;
       } while (cursor);
+    } catch (error) {
+      await close();
+      // SDK errors can contain credentials, commands and endpoint URLs.
+      if (error instanceof McpError && error.code === ErrorCode.RequestTimeout)
+        failure += " (request timed out)";
+      return (
+        failure + ". Check the server configuration or deselect it and retry."
+      );
     }
-  } catch {
-    await close();
-    // Configuration can contain credentials; don't put SDK/command errors in history.
-    throw new Error(
-      "MCP initialization failed; check server configuration and tool names",
-    );
   }
 }

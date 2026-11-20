@@ -2,16 +2,20 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { ErrorCode, McpError } from "@modelcontextprotocol/sdk/types.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { MCP_CONFIG_ENV, registerMcpTools } from "../src/mcp.js";
 
+const listTools = vi.hoisted(() =>
+  vi.fn(async () => ({
+    tools: [{ name: "read", inputSchema: { type: "object" } }],
+  })),
+);
 vi.mock("@modelcontextprotocol/sdk/client/index.js", () => ({
   Client: class {
     connect = vi.fn();
     close = vi.fn();
-    listTools = async () => ({
-      tools: [{ name: "read", inputSchema: { type: "object" } }],
-    });
+    listTools = listTools;
   },
 }));
 vi.mock("@modelcontextprotocol/sdk/client/stdio.js", () => ({
@@ -69,18 +73,32 @@ async function activation(
   const tools: any[] = [];
   const handlers = new Map<string, Function>();
   const setActiveTools = vi.fn();
-  await registerMcpTools({
+  const failure = await registerMcpTools({
     on: (name: string, fn: Function) => handlers.set(name, fn),
     registerTool: (tool: any) => tools.push({ ...tool, exposure }),
     getActiveTools: () => active,
     getAllTools: () => tools,
     setActiveTools,
   } as unknown as ExtensionAPI);
+  if (failure) throw new Error(failure);
   handlers.get("session_start")!();
   return setActiveTools;
 }
 
 describe("ACP MCP activation loadout", () => {
+  it("reports a tools/list timeout without forwarding SDK details", async () => {
+    listTools.mockRejectedValueOnce(
+      new McpError(ErrorCode.RequestTimeout, "private fixture detail"),
+    );
+    await expect(activation(["catalog"], [])).rejects.toThrow(
+      /^Could not list tools from MCP server "catalog" \(request timed out\)\. Check the server configuration or deselect it and retry\.$/,
+    );
+  });
+  it("identifies the server whose normalized tool name conflicts", async () => {
+    await expect(activation(["my server", "my_server"], [])).rejects.toThrow(
+      /Could not register tools from MCP server "my_server": normalized tool names must be unique/,
+    );
+  });
   it("adds current MCP selection absent from restored history while preserving native user tool choices", async () => {
     const update = await activation(
       ["target"],

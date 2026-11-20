@@ -274,6 +274,7 @@ export class PiRpcConnection implements AgentConnection {
   private compactions = 0;
   private lastModelKey?: string;
   private steerCommand = "";
+  private mcpStartupError?: string;
   private pendingSteer?: {
     id: string;
     run: Run;
@@ -305,8 +306,7 @@ export class PiRpcConnection implements AgentConnection {
   initialize: AgentConnection["initialize"] = async () => {
     await this.rpc.request("get_state");
     await this.rpc.drain();
-    if (!this.steerCommand)
-      throw new Error("Required Lody Pi extension did not initialize");
+    this.assertReady();
     return initializeResponse();
   };
 
@@ -321,6 +321,7 @@ export class PiRpcConnection implements AgentConnection {
       await this.host.configureWorkspace(workspace);
       await this.host.configureMcp(request.mcpServers ?? []);
       this.steerCommand = "";
+      this.mcpStartupError = undefined;
       const result = z
         .object({ cancelled: z.boolean() })
         .parse(await this.rpc.request("new_session"));
@@ -348,6 +349,7 @@ export class PiRpcConnection implements AgentConnection {
       await this.host.configureWorkspace(workspace);
       await this.host.configureMcp(request.mcpServers ?? []);
       this.steerCommand = "";
+      this.mcpStartupError = undefined;
       const result = z.object({ cancelled: z.boolean() }).parse(
         await this.rpc.request("switch_session", {
           sessionPath: request.sessionId,
@@ -906,7 +908,9 @@ export class PiRpcConnection implements AgentConnection {
 
   private assertReady(): void {
     if (!this.steerCommand)
-      throw new Error("Required Lody Pi extension did not initialize");
+      throw new Error(
+        this.mcpStartupError ?? "Required Lody Pi extension did not initialize",
+      );
   }
 
   private async event(event: Record<string, unknown>): Promise<void> {
@@ -920,6 +924,11 @@ export class PiRpcConnection implements AgentConnection {
         .object({ type: z.string() })
         .passthrough()
         .parse(JSON.parse(event.message.slice("lody-rpc:".length)));
+      if (payload.type === "lody_mcp_start_failed") {
+        this.mcpStartupError = z.string().max(2048).parse(payload.message);
+        this.steerCommand = "";
+        return;
+      }
       if (payload.type === "lody_turn_boundary") {
         const { turnId } = z
           .object({ turnId: z.string().min(1) })
@@ -1077,6 +1086,7 @@ export class PiRpcConnection implements AgentConnection {
         .parse(JSON.parse(event.message.slice("lody-rpc:".length)));
     }
     if (event.type === "lody_steer_ready") {
+      this.mcpStartupError = undefined;
       // Lifecycle events precede any output from the replacement runtime.
       try {
         this.observeSession(
