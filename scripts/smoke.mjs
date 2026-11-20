@@ -1675,6 +1675,27 @@ async function exercise(mode) {
   );
 }
 try {
+  const mcpProbe = await start();
+  await assert.rejects(
+    mcpProbe.client.newSession({
+      cwd: root,
+      mcpServers: [
+        {
+          name: "offline",
+          command: join(root, "private-fixture-command"),
+          args: [],
+          env: [],
+        },
+      ],
+    }),
+    (error) => {
+      const details = error.data?.details ?? "";
+      assert.match(details, /Could not connect to MCP server "offline"/);
+      assert.doesNotMatch(details, /private-fixture-command/);
+      return true;
+    },
+  );
+  await mcpProbe.close();
   for (const mode of [false, true]) await exercise(mode);
 } finally {
   clearTimeout(deadline);
