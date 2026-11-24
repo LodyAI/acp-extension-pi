@@ -970,6 +970,20 @@ export class PiRpcConnection implements AgentConnection {
           );
         return;
       }
+      if (payload.type === "lody_subagent_configuration") {
+        if (!this.host.subagentEvents || !this.sessionId) return;
+        const config = z
+          .object({
+            taskId: z.string(),
+            modelId: z.string().min(1),
+            reasoningEffort: z.string().min(1).optional(),
+          })
+          .parse(payload);
+        const { taskId, modelId, reasoningEffort } = config;
+        const observation = { modelId, reasoningEffort };
+        await this.subagents().snapshot(taskId, observation);
+        return;
+      }
       if (payload.type === "lody_subagent") {
         const task = z
           .object({

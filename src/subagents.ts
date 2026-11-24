@@ -98,6 +98,7 @@ export function registerSubagents(
       let buffer = "";
       let messageId = randomUUID();
       let lastToolName: string | undefined;
+      let observedEffort: string | undefined;
       const info: LodySubagentTask = {
         taskId: id,
         description: args.description,
@@ -223,9 +224,40 @@ export function registerSubagents(
               event.type === "message_end" &&
               event.message?.role === "assistant"
             ) {
-              // Child usage is live-only (--no-session); forward just its accounting fields.
-              const { provider, model, responseId, timestamp, usage } =
-                event.message;
+              // Pi records the physical model and effective thinking level on the response.
+              const {
+                provider,
+                model,
+                thinkingLevel,
+                responseId,
+                timestamp,
+                usage,
+              } = event.message;
+              if (
+                typeof provider === "string" &&
+                provider &&
+                typeof model === "string" &&
+                model
+              ) {
+                const modelId = `${provider}/${model}`;
+                const reasoningEffort =
+                  typeof thinkingLevel === "string" && thinkingLevel
+                    ? thinkingLevel
+                    : undefined;
+                if (
+                  modelId !== info.modelId ||
+                  reasoningEffort !== observedEffort
+                ) {
+                  info.modelId = modelId;
+                  observedEffort = reasoningEffort;
+                  emit(ctx, {
+                    type: "lody_subagent_configuration",
+                    taskId: id,
+                    modelId,
+                    reasoningEffort,
+                  });
+                }
+              }
               emit(ctx, {
                 type: "lody_usage",
                 taskId: id,

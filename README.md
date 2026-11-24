@@ -51,6 +51,7 @@ compatibility promise.
 
 When both peers advertise `subagentEvents` v1, child JSONL text/thinking deltas,
 tool starts/results and lifecycle/progress feed Core `_lody/subagents/event`.
+Each child assistant response updates its run with the model and thinking level reported by Pi.
 Legacy task cards are suppressed for these runs; non-negotiated clients keep them.
 Children still cannot ask questions or spawn descendants. Existing task-ID
 list/output/cancel endpoints remain separate; normalized run controls are disabled.

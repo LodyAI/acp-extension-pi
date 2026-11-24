@@ -458,6 +458,12 @@ describe("native Pi connection", () => {
     };
     emit({ type: "lody_subagent", event: "started", task, state: "running" });
     emit({
+      type: "lody_subagent_configuration",
+      taskId: "child",
+      modelId: "worker/fast",
+      reasoningEffort: "off",
+    });
+    emit({
       type: "lody_subagent_output",
       taskId: "child",
       event: {
@@ -498,8 +504,12 @@ describe("native Pi connection", () => {
       state: "killed",
     });
     await done.promise;
+    expect(events.at(-1)).toMatchObject({
+      snapshot: { modelId: "worker/fast", reasoningEffort: "off" },
+    });
     expect(events.every(isLodySubagentEvent)).toBe(true);
     expect(events.map((event) => event.type)).toEqual([
+      "snapshot",
       "snapshot",
       "output",
       "output",
