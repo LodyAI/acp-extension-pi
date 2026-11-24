@@ -3,4 +3,4 @@ packages:
 
 # Explicitly approved Core release; preserve any inherited release-age policy.
 minimumReleaseAgeExclude:
-  - acp-extension-core@0.1.9
+  - acp-extension-core@0.4.0

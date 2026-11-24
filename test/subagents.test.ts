@@ -26,6 +26,7 @@ function createRecorderShim(directory: string): string {
   writeFileSync(
     join(directory, "recorder.mjs"),
     'import { writeFileSync } from "node:fs";\n' +
+      'console.log(JSON.stringify({ type: "message_end", message: { role: "assistant", provider: "worker", model: "actual", thinkingLevel: "off" } }));\n' +
       "writeFileSync(process.env.RECORDER_OUT, JSON.stringify(process.argv.slice(2)));\n",
   );
 
@@ -111,6 +112,13 @@ describe("registerSubagents", () => {
       model: "other/vendor/large",
     });
     expect(modelArg(argv)).toBe("other/vendor/large");
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        type: "lody_subagent_configuration",
+        modelId: "worker/actual",
+        reasoningEffort: "off",
+      }),
+    );
     expect(events).toContainEqual(
       expect.objectContaining({
         type: "lody_subagent",

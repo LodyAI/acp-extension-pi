@@ -17,8 +17,8 @@ importers:
         specifier: 1.29.0
         version: 1.29.0(zod@4.3.6)
       acp-extension-core:
-        specifier: 0.1.9
-        version: 0.1.9(zod@4.3.6)
+        specifier: 0.4.0
+        version: 0.4.0(zod@4.3.6)
       cross-spawn:
         specifier: ^7.0.6
         version: 7.0.6
@@ -986,10 +986,10 @@ packages:
       }
     engines: { node: ">= 0.6" }
 
-  acp-extension-core@0.1.9:
+  acp-extension-core@0.4.0:
     resolution:
       {
-        integrity: sha512-TH10B+4AfXDSjmvSNOOvAWfbDZeT5G8ngdilVjZ7RXvE4sw53IO/TzJokbzjIKaZzo51G4pGqElj9b9kPp7Rkg==,
+        integrity: sha512-sQVEwRPDC6sqhg5tanptQ5ymrWu6nZ3mZFFGcwbImuWsHN3lukvSQIajOoABt8aLh4OjeIg0VuEZmDT7AmZ+JQ==,
       }
 
   agent-base@7.1.4:
@@ -3110,7 +3110,7 @@ snapshots:
       mime-types: 3.0.2
       negotiator: 1.1.0
 
-  acp-extension-core@0.1.9(zod@4.3.6):
+  acp-extension-core@0.4.0(zod@4.3.6):
     dependencies:
       "@agentclientprotocol/sdk": 1.4.0(zod@4.3.6)
     transitivePeerDependencies:

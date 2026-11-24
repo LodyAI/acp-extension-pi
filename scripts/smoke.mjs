@@ -1472,6 +1472,8 @@ async function exercise(mode) {
     ),
   );
   assert.equal(c.runEvents.at(-1).snapshot.state, "completed");
+  assert.equal(c.runEvents.at(-1).snapshot.modelId, "extensiontest/fixture");
+  assert.equal(c.runEvents.at(-1).snapshot.reasoningEffort, "off");
   assert.ok(
     c.runEvents.every(
       (event) =>
